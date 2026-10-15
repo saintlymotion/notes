@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Тетрадь заметок</title>
 <meta name="theme-color" content="#3554d1">
+<script>try{var t=localStorage.getItem("notes-theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}</script>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icons/icon-192.png">
 <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
@@ -20,9 +21,12 @@
   --f-title:"Literata",Georgia,"Times New Roman",serif;
   --r:8px; color-scheme:light;
 }
-@media (prefers-color-scheme:dark){:root{
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
   --bg:#14171e; --panel:#1b1f28; --line:#2b313d; --fg:#e6e9ef; --muted:#8e96a8;
   --accent:#8aa2ff; --accent-soft:#252d4a; --done:#5d6578; --danger:#ff7b6b; --ok:#5fcf8f; --red:#ff6b6b; --yellow:#f2c94c; --green:#5fcf8f; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#14171e; --panel:#1b1f28; --line:#2b313d; --fg:#e6e9ef; --muted:#8e96a8;
+  --accent:#8aa2ff; --accent-soft:#252d4a; --done:#5d6578; --danger:#ff7b6b; --ok:#5fcf8f; --red:#ff6b6b; --yellow:#f2c94c; --green:#5fcf8f; color-scheme:dark}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
 body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:15px;line-height:1.5;
@@ -161,6 +165,19 @@ mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding
 .prio-pick button.on{background:var(--accent-soft);box-shadow:inset 0 0 0 1.5px var(--fg)}
 .prio-pick .lbl{font-size:12px;color:var(--muted);padding:0 4px}
 
+/* Закрепление, даты, «Сегодня» */
+.note span.pin{display:inline;margin-right:5px;font-size:11px}
+.dtag{font-size:12px;color:var(--muted);white-space:nowrap;padding-top:4px;flex:none}
+.dtag.today{color:var(--yellow);font-weight:500} .dtag.late{color:var(--red)} .dtag.soon{color:var(--accent)}
+.block.done .dtag{color:var(--done)}
+.chip.today-btn{flex:none;display:flex;align-items:center;gap:5px}
+.chip.today-btn.on{border-color:var(--accent);color:var(--accent)}
+.chip.today-btn .cnt{font-variant-numeric:tabular-nums}
+.note .line{display:flex;align-items:baseline;gap:6px;font-size:14px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.note .line .lt{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.note .line .lbox{width:11px;height:11px;border:1.5px solid var(--muted);border-radius:3px;flex:none;align-self:center}
+.theme-btn .ti{width:12px;display:grid;place-items:center;font-size:13px;margin-left:-2px}
+
 /* Маскоты: Клубничка и Малинка */
 .mascot{display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:var(--r);position:relative;text-align:left;width:100%}
 .mascot:hover{background:var(--accent-soft)}
@@ -236,7 +253,7 @@ mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding
 <div class="app" id="app">
   <nav class="col folders" id="folders" aria-label="Папки и треды"></nav>
   <section class="col list" id="list">
-    <div class="search"><input id="q" type="search" placeholder="Поиск по всем заметкам" aria-label="Поиск по всем заметкам" autocomplete="off"><button class="chip urgent" id="urgentBtn" title="Срочное и скоро"><span class="pdot red"></span><span id="urgentN">0</span></button></div>
+    <div class="search"><input id="q" type="search" placeholder="Поиск" aria-label="Поиск по всем заметкам" autocomplete="off"><button class="chip today-btn" id="todayBtn" title="Дела на сегодня и неделю">Сегодня <span class="cnt" id="todayN"></span></button><button class="chip urgent" id="urgentBtn" title="Срочное и скоро"><span class="pdot red"></span><span id="urgentN">0</span></button></div>
     <div class="list-inner" id="listBody"></div>
   </section>
   <section class="col editor" id="editor"></section>
@@ -656,6 +673,9 @@ function renderResults(){
       : `<div class="empty">Ничего не нашлось. Поиск идёт по названиям и тексту всех заметок во всех папках.</div>`}</div>`;
 }
 function updateUrgentBtn(){
+  const tc = todayCount();
+  $("#todayN").textContent = tc ? tc : "";
+  $("#todayBtn").classList.toggle("on", view === "today");
   const {red} = urgentLists();
   $("#urgentN").textContent = red.length;
   $("#urgentBtn").classList.toggle("on", view === "urgent");
@@ -703,7 +723,7 @@ function renderFolders(){
     h += `<button class="folder sub add-thread" id="addThread"><span class="name">+ Новый тред</span></button>`;
   }
   h += `<button class="icon-btn add-folder-m" id="addFolderM" aria-label="Новая папка">+</button>` +
-    `<div class="foot">${mascotBtn()}<button class="sync trash-btn${view === "trash" ? " on" : ""}" id="trashBtn"><span class="ti">🗑</span><span>Корзина${(state.trash || []).length ? " · " + state.trash.length : ""}</span></button><button class="sync" id="syncBtn"></button></div>`;
+    `<div class="foot">${mascotBtn()}<button class="sync theme-btn" id="themeBtn" title="Сменить тему"><span class="ti">${THEME_ICON[themeMode]}</span><span>${THEME_NAME[themeMode]}</span></button><button class="sync trash-btn${view === "trash" ? " on" : ""}" id="trashBtn"><span class="ti">🗑</span><span>Корзина${(state.trash || []).length ? " · " + state.trash.length : ""}</span></button><button class="sync" id="syncBtn"></button></div>`;
   el.innerHTML = h;
   renderSync();
   const inp = $("#nameInput");
@@ -718,6 +738,110 @@ function renderFolders(){
     inp.onblur = done;
     inp.onkeydown = e => { if(e.key === "Enter") inp.blur(); };
   }
+}
+
+/* ================= Даты у строк =================
+   «@сегодня», «@завтра», «@пт», «@20.10», «@20 окт», «@5» (число месяца). Дата фиксируется, когда её написали. */
+const WD = ["вс","пн","вт","ср","чт","пт","сб"];
+const MON = ["янв","фев","мар","апр","ма","июн","июл","авг","сен","окт","ноя","дек"];
+const DATE_RE = /(?:^|\s)@(сегодня|завтра|послезавтра|пн|вт|ср|чт|пт|сб|вс|\d{1,2}\.\d{1,2}(?:\.\d{2,4})?|\d{1,2}(?:\s+(?:янв|фев|мар|апр|ма[яй]|июн|июл|авг|сен|окт|ноя|дек)[а-я]*)?)(?=$|[\s,.;!?)])/i;
+const iso = d => d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+const day0 = (d = new Date()) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
+const fromIso = s => { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); };
+const dayDiff = s => Math.round((fromIso(s) - day0()) / 864e5);
+function resolveDate(tok){
+  const t = tok.toLowerCase(), now = day0(), add = k => new Date(now.getFullYear(), now.getMonth(), now.getDate() + k);
+  if(t === "сегодня") return now;
+  if(t === "завтра") return add(1);
+  if(t === "послезавтра") return add(2);
+  const w = WD.indexOf(t);
+  if(w >= 0) return add((w - now.getDay() + 7) % 7);
+  let m = t.match(/^(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?$/);
+  if(m){
+    let y = m[3] ? +m[3] : now.getFullYear(); if(y < 100) y += 2000;
+    let d = new Date(y, +m[2] - 1, +m[1]);
+    if(!m[3] && d < add(-60)) d = new Date(y + 1, +m[2] - 1, +m[1]);
+    return d;
+  }
+  m = t.match(/^(\d{1,2})(?:\s+([а-я]+))?$/);
+  if(m){
+    const day = +m[1];
+    if(m[2]){
+      const mi = MON.findIndex(x => m[2].startsWith(x));
+      if(mi < 0) return null;
+      let d = new Date(now.getFullYear(), mi, day);
+      if(d < add(-60)) d = new Date(now.getFullYear() + 1, mi, day);
+      return d;
+    }
+    if(day < 1 || day > 31) return null;
+    return day >= now.getDate() ? new Date(now.getFullYear(), now.getMonth(), day) : new Date(now.getFullYear(), now.getMonth() + 1, day);
+  }
+  return null;
+}
+/* дату пересчитываем только если сам токен поменялся, чтобы «@пт» не «уезжал» на следующую неделю */
+function syncDate(b){
+  if(b.type === "image" || b.habit) return;
+  const m = b.text.match(DATE_RE);
+  if(!m){ if(b.date){ delete b.date; delete b.dtok; } return; }
+  const tok = m[1].toLowerCase();
+  if(tok === b.dtok && b.date) return;
+  const d = resolveDate(tok);
+  if(d){ b.date = iso(d); b.dtok = tok; } else { delete b.date; delete b.dtok; }
+}
+function dateLabel(isoStr){
+  const k = dayDiff(isoStr), d = fromIso(isoStr);
+  const nice = WD[d.getDay()] + ", " + d.toLocaleDateString("ru-RU", {day:"numeric", month:"short"});
+  if(k === 0) return {t:"сегодня", c:"today"};
+  if(k === 1) return {t:"завтра", c:"soon"};
+  if(k < 0) return {t:"просрочено · " + d.toLocaleDateString("ru-RU", {day:"numeric", month:"short"}), c:"late"};
+  return {t:nice, c:k <= 7 ? "soon" : ""};
+}
+function dateTag(b){
+  if(!b.date) return "";
+  const L = dateLabel(b.date);
+  return `<span class="dtag ${b.type === "check" && b.done ? "" : L.c}">${b.type === "check" && b.done && L.c === "late" ? fromIso(b.date).toLocaleDateString("ru-RU", {day:"numeric", month:"short"}) : L.t}</span>`;
+}
+/* Всё с датами из всех заметок: незакрытые чекбоксы и строки текста */
+function datedItems(){
+  const out = [];
+  for(const x of everyNote()){
+    if(x.n.kind === "budget") continue;
+    for(const b of x.n.blocks){
+      if(!b.date || b.type === "image" || (b.type === "check" && b.done)) continue;
+      const k = dayDiff(b.date);
+      if(k < 0 && b.type !== "check") continue;
+      out.push({x, b, k});
+    }
+  }
+  return out.sort((a, c) => a.k - c.k);
+}
+function todayCount(){ return datedItems().filter(i => i.k <= 0).length + (typeof habitsToday === "function" ? habitsToday().filter(h => !h.doneToday).length : 0); }
+function renderToday(){
+  const el = $("#listBody"), items = datedItems();
+  const habits = typeof habitsToday === "function" ? habitsToday() : [];
+  const line = i => `<button class="note" data-go="${i.x.n.id}"><span class="line">${i.b.type === "check" ? `<span class="lbox"></span>` : ""}<span class="lt">${esc(i.b.text.replace(DATE_RE, " ").trim() || "Без текста")}</span></span><span class="where">${esc(i.x.n.title || "Без названия")} · ${whereOf(i.x)}</span></button>`;
+  const groups = [
+    ["Просрочено", items.filter(i => i.k < 0)],
+    ["Сегодня", items.filter(i => i.k === 0)],
+    ["Завтра", items.filter(i => i.k === 1)],
+    ["На неделе", items.filter(i => i.k > 1 && i.k <= 7)],
+    ["Позже", items.filter(i => i.k > 7).slice(0, 30)]
+  ];
+  const hab = habits.length ? `<div class="sec">Привычки на сегодня</div>` + habits.map(h => `<button class="note" data-go="${h.x.n.id}"><span class="line"><span class="lbox"${h.doneToday ? ` style="background:var(--accent);border-color:var(--accent)"` : ""}></span><span class="lt">${esc(h.label)}</span></span><span class="where">${h.streak ? `серия ${h.streak} ${dayWord(h.streak)} · ` : ""}${esc(h.x.n.title || "Без названия")}</span></button>`).join("") : "";
+  const body = groups.filter(g => g[1].length).map(g => `<div class="sec">${g[0]}</div>` + g[1].map(line).join("")).join("") + hab;
+  el.innerHTML = `<div class="list-head"><div class="hd"><h2>Сегодня</h2><span class="where">${new Date().toLocaleDateString("ru-RU", {weekday:"long", day:"numeric", month:"long"})}</span></div><button class="icon-btn" id="closeView" title="Закрыть" aria-label="Закрыть">✕</button></div>
+    <div class="notes">${body || `<div class="empty">Дел с датами пока нет. Допишите к строке дату: <b>@сегодня</b>, <b>@завтра</b>, <b>@пт</b>, <b>@20.10</b> или <b>@20 окт</b>, и она появится здесь.</div>`}</div>`;
+}
+
+/* ================= Тема ================= */
+let themeMode = "auto";
+try{ themeMode = localStorage.getItem("notes-theme") || "auto"; }catch(e){}
+const THEME_NEXT = {auto:"light", light:"dark", dark:"auto"};
+const THEME_NAME = {auto:"Тема: как в системе", light:"Тема: светлая", dark:"Тема: тёмная"};
+const THEME_ICON = {auto:"◐", light:"☀", dark:"☾"};
+function applyTheme(){
+  if(themeMode === "auto") delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = themeMode;
 }
 
 /* ================= Маскоты =================
@@ -851,6 +975,7 @@ function removeImagesOf(notes){
 function renderList(){
   updateUrgentBtn();
   if(view === "trash"){ renderTrash(); return; }
+  if(view === "today"){ renderToday(); return; }
   if(view || query.trim()){ renderResults(); return; }
   const f = folder(), t = thread(), p = place(), el = $("#listBody");
   if(!f){ el.innerHTML = `<div class="placeholder">Создайте первую папку кнопкой «+», например по названию игры</div>`; return; }
@@ -861,7 +986,7 @@ function renderList(){
   const head = t
     ? `<div class="hd"><button class="crumb" data-f="${f.id}">${esc(f.name)}</button><h2># ${esc(t.name)}</h2></div>`
     : `<div class="hd"><h2>${esc(f.name)}</h2></div>`;
-  const notes = [...p.notes].sort((a,b) => b.updated - a.updated);
+  const notes = [...p.notes].sort((a,b) => (!!b.pinned - !!a.pinned) || (b.updated - a.updated));
   const threads = !t && f.threads.length
     ? `<div class="sec">Треды</div>` + f.threads.map(x =>
         `<button class="note thread-row" data-t="${x.id}"><b># ${esc(x.name)}</b><span>${x.notes.length ? "Заметок: " + x.notes.length : "Пока пусто"}</span></button>`).join("") +
@@ -870,7 +995,7 @@ function renderList(){
   el.innerHTML = `<div class="list-head">${head}<div style="display:flex;gap:2px;flex:none">${tools}</div></div>
     <div class="list-actions"><button class="chip" id="addNote">+ Заметка</button>${t ? "" : `<button class="chip" id="addThread2">+ Тред</button>`}</div>
     <div class="notes">${threads}${notes.length ? notes.map(n =>
-      `<button class="note ${n.id===state.cur.note?"on":""}" data-n="${n.id}"><b>${notePrio(n) ? `<span class="pdot ${notePrio(n)}"></span>` : ""}${esc(n.title || "Без названия")}</b><span>${esc(preview(n))}</span></button>`
+      `<button class="note ${n.id===state.cur.note?"on":""}" data-n="${n.id}"><b>${n.pinned ? `<span class="pin" title="Закреплено">📌</span>` : ""}${notePrio(n) ? `<span class="pdot ${notePrio(n)}"></span>` : ""}${esc(n.title || "Без названия")}</b><span>${esc(preview(n))}</span></button>`
     ).join("") : (threads ? "" : `<div class="empty">${t ? "В этом треде пока нет заметок." : "В этой папке пока нет заметок и тредов."}</div>`)}</div>`;
 }
 
@@ -889,6 +1014,7 @@ function renderEditor(){
       <button class="chip back" id="back">← Назад</button>
       <button class="chip" id="addImg">Картинка</button>
       <button class="chip${isBudget ? " on-acc" : ""}" id="budgetBtn" title="${isBudget ? "Сделать обычной заметкой" : "Считать как бюджет"}">Бюджет</button>
+      <button class="chip${n.pinned ? " on-acc" : ""}" id="pinBtn" title="${n.pinned ? "Открепить" : "Закрепить сверху списка"}">${n.pinned ? "Закреплено" : "Закрепить"}</button>
       <span class="prio-pick" aria-label="Метка заметки">${["red","yellow","green"].map(c =>
         `<button data-prio="${c}" class="${n.prio===c?"on":""}" title="${{red:"Срочно",yellow:"Скоро",green:"Не горит"}[c]}"><span class="pdot ${c}"></span></button>`).join("")}</span>
       <span class="sp"></span>
@@ -917,7 +1043,7 @@ function blockHTML(b, total, due){
   const dot = b.prio ? `<button class="pb" title="Сменить метку" aria-label="Сменить метку"><span class="pdot ${b.prio}"></span></button>` : "";
   const ph = total === 1 && b.type === "text" ? "Пишите текст. [.] в начале строки — чекбокс, !! — срочно" : "";
   return `<div class="block ${b.type}${b.done?" done":""}${b.prio?" p-"+b.prio:""}" data-b="${b.id}">${dot}${box}
-    <textarea rows="1" placeholder="${ph}">${esc(b.text)}</textarea>${dueTag(due)}</div>`;
+    <textarea rows="1" placeholder="${ph}">${esc(b.text)}</textarea>${typeof habitTag === "function" && b.habit ? habitTag(b) : ""}${due ? dueTag(due) : dateTag(b)}</div>`;
 }
 function autosize(t){ t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; }
 function render(){
@@ -927,7 +1053,7 @@ function render(){
   requestAnimationFrame(() => document.querySelectorAll("#blocks textarea").forEach(autosize));
 }
 
-function touch(){ const n = note(); if(n) n.updated = Date.now(); changed(); }
+function touch(){ const n = note(); if(n){ n.updated = Date.now(); if(n.kind !== "budget") n.blocks.forEach(syncDate); } changed(); }
 function refreshSide(){ renderList(); renderFolders(); }
 
 /* ================= Бюджет =================
@@ -1237,6 +1363,9 @@ $("#app").addEventListener("click", e => {
   const t = e.target.closest("button"); if(!t) return;
   const id = t.id, now = Date.now();
   if(t.dataset.go){ goTo(t.dataset.go); return; }
+  if(id === "todayBtn"){ view = view === "today" ? null : "today"; query = ""; $("#q").value = ""; reading = false; render(); return; }
+  if(id === "themeBtn"){ themeMode = THEME_NEXT[themeMode]; try{ localStorage.setItem("notes-theme", themeMode); }catch(e){} applyTheme(); renderFolders(); return; }
+  if(id === "pinBtn"){ const n = note(); n.pinned = !n.pinned; if(!n.pinned) delete n.pinned; redraw(); return; }
   if(id === "urgentBtn"){ view = view === "urgent" ? null : "urgent"; query = ""; $("#q").value = ""; reading = false; render(); return; }
   if(id === "closeView"){ view = null; confirmEmpty = false; renderList(); renderFolders(); return; }
   if(id === "trashBtn"){ view = view === "trash" ? null : "trash"; confirmEmpty = false; query = ""; $("#q").value = ""; reading = false; render(); return; }
@@ -1428,6 +1557,7 @@ $("#app").addEventListener("mousedown", e => {
 });
 window.addEventListener("resize", () => { document.querySelectorAll("#blocks textarea").forEach(autosize); closeMenu(); });
 
+applyTheme();
 fixCur();
 expireTrash();
 render();
