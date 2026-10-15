@@ -427,8 +427,6 @@ function renderEditor(){
     : `<button class="chip danger" id="delNote">Удалить</button>`;
   el.innerHTML = `<div class="ed-bar">
       <button class="chip back" id="back">← Назад</button>
-      <button class="chip" id="addText">+ Текст</button>
-      <button class="chip" id="addCheck">+ Чекбокс</button>
       <span class="sp"></span>
       ${checks.length ? `<span class="progress">Выполнено ${checks.filter(b=>b.done).length} из ${checks.length}</span>` : ""}
       ${del}
@@ -436,28 +434,33 @@ function renderEditor(){
     <div class="ed-body"><div class="ed-inner">
       <input class="title" id="title" placeholder="Название" value="${esc(n.title)}">
       <div class="meta">Изменено ${when(n.updated)}</div>
-      <div id="blocks">${n.blocks.map(blockHTML).join("")}</div>
+      <div id="blocks">${n.blocks.map((b,i,a) => blockHTML(b,i,a.length)).join("")}</div>
     </div></div>`;
   el.querySelectorAll("textarea").forEach(autosize);
 }
-function blockHTML(b){
+function blockHTML(b, i, total){
   const box = b.type === "check" ? `<input type="checkbox" ${b.done?"checked":""} aria-label="Отметить">` : "";
+  const ph = total === 1 && b.type === "text" ? "Пишите текст. Строка, начатая с [.], станет чекбоксом" : "";
   return `<div class="block ${b.type}${b.done?" done":""}" data-b="${b.id}">${box}
-    <textarea rows="1" placeholder="${b.type==="check"?"Пункт списка":"Текст"}">${esc(b.text)}</textarea>
-    <button class="del" title="Удалить строку" aria-label="Удалить строку">✕</button></div>`;
+    <textarea rows="1" placeholder="${ph}">${esc(b.text)}</textarea></div>`;
 }
 function autosize(t){ t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; }
 function render(){ renderFolders(); renderList(); renderEditor(); $("#app").classList.toggle("reading", reading && !!note()); }
 
 function touch(){ const n = note(); if(n) n.updated = Date.now(); changed(); }
 function refreshSide(){ renderList(); renderFolders(); }
-function addBlock(type, afterId){
-  const n = note(); if(!n) return;
-  const b = {id:uid(), type, text:"", done:false};
-  const i = afterId ? n.blocks.findIndex(x => x.id === afterId) + 1 : n.blocks.length;
-  n.blocks.splice(i, 0, b); touch(); renderEditor(); refreshSide();
-  document.querySelector(`[data-b="${b.id}"] textarea`)?.focus();
+/* Строка «[.] слово» становится чекбоксом; «[x] слово» — отмеченным */
+const CHECK_RE = /^\[([.\sxх]?)\]\s/i;
+function parseLine(line){
+  const m = line.match(CHECK_RE);
+  if(m) return {id:uid(), type:"check", text:line.slice(m[0].length), done:/[xх]/i.test(m[1])};
+  return {id:uid(), type:"text", text:line, done:false};
 }
+function focusBlock(id, pos){
+  const t = document.querySelector(`[data-b="${id}"] textarea`); if(!t) return;
+  t.focus(); const p = pos == null ? t.value.length : pos; t.setSelectionRange(p, p);
+}
+function redraw(focusId, pos){ touch(); renderEditor(); refreshSide(); if(focusId) focusBlock(focusId, pos); }
 
 $("#app").addEventListener("click", e => {
   const t = e.target.closest("button"); if(!t) return;
@@ -486,38 +489,84 @@ $("#app").addEventListener("click", e => {
     confirmDel = null; reading = false; changed(); render(); return;
   }
   if(id === "back"){ reading = false; render(); return; }
-  if(id === "addText"){ addBlock("text"); return; }
-  if(id === "addCheck"){ addBlock("check"); return; }
-  if(t.classList.contains("del")){
-    const n = note(), bid = t.closest(".block").dataset.b;
-    n.blocks = n.blocks.filter(b => b.id !== bid); touch(); renderEditor(); refreshSide(); return;
-  }
 });
 
 $("#app").addEventListener("input", e => {
   const n = note(); if(!n) return;
   if(e.target.id === "title"){ n.title = e.target.value; touch(); refreshSide(); return; }
   const blk = e.target.closest(".block"); if(!blk) return;
-  const b = n.blocks.find(x => x.id === blk.dataset.b); if(!b) return;
-  if(e.target.type === "checkbox"){ b.done = e.target.checked; touch(); renderEditor(); refreshSide(); return; }
-  b.text = e.target.value; autosize(e.target); touch(); refreshSide();
+  const i = n.blocks.findIndex(x => x.id === blk.dataset.b); if(i < 0) return;
+  const b = n.blocks[i];
+  if(e.target.type === "checkbox"){ b.done = e.target.checked; redraw(); return; }
+  const val = e.target.value;
+  // вставка нескольких строк: каждая строка — отдельная, с учётом [.]
+  if(val.includes("\n")){
+    const lines = val.split(/\r?\n/);
+    const first = parseLine(lines[0]);
+    if(b.type === "text"){ b.type = first.type; b.done = first.done; }
+    b.text = first.text;
+    const rest = lines.slice(1).map(parseLine);
+    n.blocks.splice(i + 1, 0, ...rest);
+    const last = rest[rest.length - 1];
+    redraw(last.id, last.text.length); return;
+  }
+  // набрали «[.] » в начале обычной строки — превращаем в чекбокс
+  if(b.type === "text" && CHECK_RE.test(val)){
+    const p = parseLine(val); b.type = "check"; b.text = p.text; b.done = p.done;
+    redraw(b.id, Math.max(0, e.target.selectionStart - (val.length - p.text.length))); return;
+  }
+  b.text = val; autosize(e.target); touch(); refreshSide();
 });
 
 $("#app").addEventListener("keydown", e => {
-  if(e.target.id === "title" && e.key === "Enter"){
-    e.preventDefault(); const first = document.querySelector("#blocks textarea");
-    first ? first.focus() : addBlock("text"); return;
+  const n = note(); if(!n) return;
+  if(e.target.id === "title" && (e.key === "Enter" || e.key === "ArrowDown")){
+    e.preventDefault(); n.blocks.length ? focusBlock(n.blocks[0].id, 0) : (n.blocks.push(parseLine("")), redraw(n.blocks[0].id)); return;
   }
   const blk = e.target.closest && e.target.closest(".block");
   if(!blk || e.target.tagName !== "TEXTAREA") return;
-  const n = note(), b = n.blocks.find(x => x.id === blk.dataset.b);
-  if(e.key === "Enter" && !e.shiftKey && b.type === "check"){ e.preventDefault(); addBlock("check", b.id); return; }
-  if(e.key === "Backspace" && e.target.value === "" && n.blocks.length > 1){
+  const t = e.target, i = n.blocks.findIndex(x => x.id === blk.dataset.b), b = n.blocks[i];
+  const start = t.selectionStart, endSel = t.selectionEnd, collapsed = start === endSel;
+
+  if(e.key === "Enter"){
     e.preventDefault();
-    const i = n.blocks.indexOf(b); n.blocks.splice(i, 1); touch(); renderEditor(); refreshSide();
-    const prev = document.querySelectorAll("#blocks textarea")[Math.max(0, i-1)];
-    if(prev){ prev.focus(); prev.selectionStart = prev.value.length; }
+    // Enter в пустом чекбоксе — выйти из списка
+    if(b.type === "check" && t.value === ""){ b.type = "text"; b.done = false; redraw(b.id, 0); return; }
+    const before = t.value.slice(0, start), after = t.value.slice(endSel);
+    b.text = before;
+    const nb = {id:uid(), type:b.type, text:after, done:false};
+    n.blocks.splice(i + 1, 0, nb); redraw(nb.id, 0); return;
   }
+  if(e.key === "Backspace" && collapsed && start === 0){
+    // в начале чекбокса — снять чекбокс, текст остаётся
+    if(b.type === "check"){ e.preventDefault(); b.type = "text"; b.done = false; redraw(b.id, 0); return; }
+    // в начале строки — склеить с предыдущей
+    if(i > 0){
+      e.preventDefault(); const prev = n.blocks[i - 1], pos = prev.text.length;
+      prev.text += b.text; n.blocks.splice(i, 1); redraw(prev.id, pos); return;
+    }
+  }
+  if(e.key === "Delete" && collapsed && start === t.value.length && i < n.blocks.length - 1){
+    e.preventDefault(); const next = n.blocks[i + 1];
+    b.text += next.text; n.blocks.splice(i + 1, 1); redraw(b.id, start); return;
+  }
+  if(e.key === "ArrowUp" && collapsed && !t.value.slice(0, start).includes("\n") && t.value.slice(0,start).length === 0){
+    if(i > 0){ e.preventDefault(); focusBlock(n.blocks[i - 1].id); } else { e.preventDefault(); $("#title")?.focus(); }
+    return;
+  }
+  if(e.key === "ArrowDown" && collapsed && start === t.value.length && i < n.blocks.length - 1){
+    e.preventDefault(); focusBlock(n.blocks[i + 1].id, 0);
+  }
+});
+
+// клик по пустому месту под текстом — курсор в последнюю строку (или новую)
+$("#app").addEventListener("mousedown", e => {
+  if(!e.target.classList || !(e.target.classList.contains("ed-body") || e.target.classList.contains("ed-inner") || e.target.id === "blocks")) return;
+  const n = note(); if(!n) return;
+  e.preventDefault();
+  const last = n.blocks[n.blocks.length - 1];
+  if(last && last.text === "" && last.type === "text"){ focusBlock(last.id); return; }
+  const nb = parseLine(""); n.blocks.push(nb); redraw(nb.id);
 });
 window.addEventListener("resize", () => document.querySelectorAll("#blocks textarea").forEach(autosize));
 
