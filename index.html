@@ -190,6 +190,7 @@ mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding
 .plan tr.tot.neg td, .plan .neg{color:var(--red)}
 .bg-note{font-size:13px}
 .bg-note.warn{color:var(--red)}
+.bg-note a{color:var(--accent)}
 .bg-note code{font-family:inherit;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:0 4px;white-space:nowrap}
 .bg-help{font-size:12px;color:var(--muted);line-height:1.5}
 .bg-help code{font-family:inherit;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:0 4px;white-space:nowrap}
@@ -891,24 +892,78 @@ function daysUntil(day){
   const next = new Date(now.getFullYear(), now.getMonth() + 1, Math.min(day, new Date(now.getFullYear(), now.getMonth() + 2, 0).getDate()));
   return Math.round((next - new Date(now.getFullYear(), now.getMonth(), today)) / 864e5);
 }
+/* ================= Курс валют =================
+   Рыночный курс (как в Google) — ExchangeRate-API, раз в сутки; если недоступен — курс ЦБ.
+   Последний курс запоминается и работает без интернета. Свой курс: строка «Курс: 92» или «Курс €: 100». */
+let FX = {rates:null, at:0, fetched:0, src:""};
+try{ FX = JSON.parse(localStorage.getItem("notes-fx")) || FX; }catch(e){}
+let fxLoading = false;
+async function loadFx(force){
+  if(fxLoading || (!force && FX.rates && Date.now() - FX.fetched < 6 * 3600e3)) return;
+  fxLoading = true;
+  try{
+    const j = await (await fetch("https://open.er-api.com/v6/latest/USD")).json();
+    if(j.result !== "success" || !j.rates?.RUB) throw new Error("bad");
+    FX = {rates:{USD:j.rates.RUB, EUR:j.rates.RUB / j.rates.EUR}, at:j.time_last_update_unix * 1000, fetched:Date.now(), src:"market"};
+  }catch(e){
+    try{
+      const j = await (await fetch("https://www.cbr-xml-daily.ru/daily_json.js")).json();
+      const v = k => j.Valute[k].Value / j.Valute[k].Nominal;
+      FX = {rates:{USD:v("USD"), EUR:v("EUR")}, at:Date.parse(j.Date), fetched:Date.now(), src:"cbr"};
+    }catch(e2){ fxLoading = false; return; }
+  }
+  fxLoading = false;
+  try{ localStorage.setItem("notes-fx", JSON.stringify(FX)); }catch(e){}
+  // пересчитать открытый бюджет, не сбивая ввод
+  const n = note();
+  if(n && n.kind === "budget"){
+    if($("#editor").contains(document.activeElement)){ const pnl = $("#budgetPanel"); if(pnl) pnl.outerHTML = budgetPanel(n); }
+    else renderEditor();
+    renderList();
+  }
+}
+const CUR_RE = {USD:/\$|usd|долл|дол\.|бакс/i, EUR:/€|eur|евро/i};
+const curOf = str => CUR_RE.USD.test(str) ? "USD" : CUR_RE.EUR.test(str) ? "EUR" : null;
+const RATE_RE = /^курс\s*(\$|usd|долл\S*|€|eur|евро)?\s*:?\s*(.*)$/i;
+const CUR_SIGN = {USD:"$", EUR:"€"};
+const fmtCur = (v, cur) => (Math.round(v * 100) / 100).toLocaleString("ru-RU") + " " + CUR_SIGN[cur];
+
 function budgetOf(n){
   const today = new Date().getDate();
   let balance = null, adults = 0, kids = 0, people = 0;
   const incomes = [], pays = [], over = {};
+  // свой курс из строк «Курс: 92», «Курс €: 100»
+  const myRate = {};
+  for(const b of n.blocks){
+    if(b.type !== "text") continue;
+    const m = b.text.trim().match(RATE_RE);
+    if(m){ const v = parseMoney(m[2]); if(v) myRate[m[1] ? (curOf(m[1]) || "USD") : "USD"] = v; }
+  }
+  const usedCur = new Set(); let noRate = false;
+  // сумма в рублях; доллары и евро пересчитываются по курсу
+  const money = str => {
+    const v = parseMoney(str); if(v == null) return null;
+    const cur = curOf(str); if(!cur) return {rub:v};
+    const r = myRate[cur] || FX.rates?.[cur];
+    if(!r){ noRate = true; return null; }
+    usedCur.add(cur); return {rub:v * r, cur, orig:v};
+  };
   for(const b of n.blocks){
     if(b.type === "image") continue;
     const t = b.text.trim();
     let m;
     if(b.type === "text"){
-      if((m = t.match(BAL_RE))){ const v = parseMoney(m[2]); if(v != null) balance = v; continue; }
+      if(t.match(RATE_RE)) continue;
+      if((m = t.match(BAL_RE))){ const v = money(m[2]); if(v) balance = v.rub; continue; }
       if((m = t.match(PAY_RE))){
         // «Зарплата: 10-го 40 000», «Аванс 25 числа 30к», «Зарплата: 100 000»
         let rest = unThousand(m[2]);
         const dm = rest.match(/(?:^|[^\d])(\d{1,2})(?!\d)(?:\s*-?\s*(?:го|е|ого))?(?:\s*числа)?/i);
         let day = null;
         if(dm && +dm[1] >= 1 && +dm[1] <= 31){ day = +dm[1]; rest = rest.replace(dm[0], " "); }
-        const amount = parseMoney(rest);
-        incomes.push({day, amount: amount != null && amount >= 100 ? amount : null, name:m[1][0].toUpperCase() + m[1].slice(1).toLowerCase()});
+        const mv = money(rest);
+        const amount = mv && (mv.cur || mv.rub >= 100) ? mv.rub : null;
+        incomes.push({day, amount, cur:mv?.cur, orig:mv?.orig, name:m[1][0].toUpperCase() + m[1].slice(1).toLowerCase()});
         continue;
       }
       if((m = t.match(PEOPLE_RE))){
@@ -919,7 +974,7 @@ function budgetOf(n){
       if((m = t.match(NEED_RE))){
         const key = NEED_KEY[m[1].toLowerCase()], pm = m[2].match(/(\d+(?:[.,]\d+)?)\s*%/);
         if(pm) over[key] = {pct: parseFloat(pm[1].replace(",", ".")) / 100};
-        else { const v = parseMoney(m[2]); if(v != null) over[key] = {sum: v}; }
+        else { const v = money(m[2]); if(v) over[key] = {sum: v.rub}; }
         continue;
       }
       continue;
@@ -928,11 +983,12 @@ function budgetOf(n){
     const dm = t.match(DUE_RE);
     const due = dm ? +(dm[1] || dm[2]) : null;
     const rest = dm ? t.replace(dm[0], " ") : t;
-    const amount = parseMoney(rest);
-    if(amount == null) continue;
-    const label = unThousand(rest).replace(/\d+(?:[.,]\d+)?\s*(тыс|к|k|₽|р\.?|руб\.?)?(?![a-zа-яё])/i, "").replace(/[—–\-:,.]+\s*$/, "").replace(/\s+/g, " ").trim() || "Платёж";
+    const mv = money(rest);
+    if(!mv) continue;
+    const amount = mv.rub;
+    const label = unThousand(rest).replace(/\d+(?:[.,]\d+)?\s*(тыс|к|k|₽|р\.?|руб\.?)?(?![a-zа-яё])/i, "").replace(/\$|€|\busd\b|\beur\b|евро|долл\S*|дол\.|бакс\S*/gi, "").replace(/[—–\-:,.]+\s*$/, "").replace(/\s+/g, " ").trim() || "Платёж";
     const overdue = !b.done && due != null && due < today;
-    pays.push({b, label, amount, due, done:b.done, overdue, left: due != null && due >= today ? due - today : null});
+    pays.push({b, label, amount, cur:mv.cur, orig:mv.orig, due, done:b.done, overdue, left: due != null && due >= today ? due - today : null});
   }
   const total = pays.reduce((s, x) => s + x.amount, 0);
   const paid = pays.filter(x => x.done).reduce((s, x) => s + x.amount, 0);
@@ -997,14 +1053,15 @@ function budgetOf(n){
     let carry = 0;
     for(const p of periods){ if(p.left == null) break; p.carry = carry; p.total = carry + p.left; carry = p.total; }
   }
-  return {balance, pays, total, paid, unpaid, free, dueNow, laterPays, daysToPay, perDay, livingUntilPay, next: open[0] || null, nextIncome, plan, periods};
+  const fx = usedCur.size || noRate ? {cur:[...usedCur], noRate, rate:Object.fromEntries([...usedCur].map(c => [c, myRate[c] || FX.rates?.[c]])), mine:myRate} : null;
+  return {fx, balance, pays, total, paid, unpaid, free, dueNow, laterPays, daysToPay, perDay, livingUntilPay, next: open[0] || null, nextIncome, plan, periods};
 }
 function dayWord(n){ const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? "день" : a >= 2 && a <= 4 && (b < 12 || b > 14) ? "дня" : "дней"; }
 function peopleWord(n){ const a = n % 10, b = n % 100; return a >= 2 && a <= 4 && (b < 12 || b > 14) ? "человека" : "человек"; }
 const pctOf = (v, inc) => inc ? Math.round(v / inc * 100) + "%" : "";
 function budgetPanel(n){
   const B = budgetOf(n);
-  const help = `<div class="bg-help">Пишите строками: <code>Есть: 85 000</code> <code>Зарплата: 10-го 40 000</code> <code>Аванс: 25-го 30 000</code> <code>Людей: 3</code>, платежи — <code>[.] Аренда 35 000 до 5</code>. Свои нормы: <code>Еда: 40 000</code> <code>Транспорт: 12%</code> <code>Развлечения: 5 000</code> <code>Копить: 15%</code>. Галочки платежей снимаются 1-го числа.</div>`;
+  const help = `<div class="bg-help">Пишите строками: <code>Есть: 85 000</code> <code>Зарплата: 10-го 40 000</code> <code>Аванс: 25-го 30 000</code> <code>Людей: 3</code>, платежи — <code>[.] Аренда 35 000 до 5</code>. Валюта: <code>Зарплата: 10-го 1 500 $</code>, <code>200 €</code>. Свои нормы: <code>Еда: 40 000</code> <code>Транспорт: 12%</code> <code>Развлечения: 5 000</code> <code>Копить: 15%</code>. Галочки платежей снимаются 1-го числа.</div>`;
   if(B.balance == null && !B.pays.length && !B.plan) return `<div class="budget" id="budgetPanel">${help}</div>`;
   const ni = B.nextIncome;
   const GEN = {"зарплата":"зарплаты","зп":"зп","аванс":"аванса","получка":"получки","доход":"дохода"};
@@ -1038,13 +1095,13 @@ function budgetPanel(n){
         ${row("Отложить", P.save, mine("save") || (P.saveCut ? "сколько остаётся, цель 20%" : "правило 20%"))}
         ${P.rest != null ? `<tr class="tot${P.rest < 0 ? " neg" : ""}"><td>${P.rest < 0 ? "Не хватает на необходимое" : "Остаётся на прочее"}</td><td>${rub(Math.abs(P.rest))}</td><td>${pctOf(Math.abs(P.rest), P.income)}</td></tr>` : ""}
       </table>
-      ${P.needsPct != null ? `<div class="bg-note${P.needsPct > 0.5 ? " warn" : ""}">На необходимое (платежи, еда, транспорт) уходит ${Math.round(P.needsPct * 100)}% дохода${P.needsPct > 0.5 ? ` — больше рекомендуемых 50%` : `, это в пределах рекомендуемых 50%`}.</div>`
+      ${P.needsPct != null ? `<div class="bg-note${Math.round(P.needsPct * 100) > 50 ? " warn" : ""}">На необходимое (платежи, еда, транспорт) уходит ${Math.round(P.needsPct * 100)}% дохода${Math.round(P.needsPct * 100) > 50 ? ` — больше рекомендуемых 50%` : `, это в пределах рекомендуемых 50%`}.</div>`
         : !P.income ? `<div class="bg-note">Добавьте сумму зарплаты, например <code>Зарплата: 10-го 40 000</code>, чтобы посчитать транспорт, развлечения и накопления.</div>` : ""}
       ${!P.heads && P.income ? `<div class="bg-note">Добавьте строку <code>Людей: 2</code>, чтобы посчитать еду.</div>` : ""}
     </div>`;
   }
   const per = B.periods.length ? `<div class="plan"><span class="bl">По зарплатам</span><table>${B.periods.map(p =>
-      `<tr><td>${esc(p.x.name)} ${p.from}-го${p.soon === 0 ? " · сегодня" : ` · через ${p.soon} ${dayWord(p.soon)}`}${p.x.amount ? `<span class="pn">${rub(p.x.amount)} на ${p.len} ${dayWord(p.len)}, до ${p.to}-го</span>` : ""}</td><td>${p.count ? `платежи ${rub(p.sum)}<span class="pn">${p.ps.map(q => esc(q.label) + " " + q.due + "-го").join(", ")}</span>` : "без платежей"}<span class="pn">на жизнь ≈ ${rub(p.life)}</span></td><td>${p.total != null ? `<b class="${p.total < 0 ? "neg" : ""}">${p.total < 0 ? "−" : ""}${rub(Math.abs(p.total))}</b><span class="pn">${p.total < 0 ? "не хватит" : "останется"}${p.carry ? `, с учётом ${rub(p.carry)} с прошлой` : ""}</span>` : ""}</td></tr>`).join("")}</table></div>` : "";
+      `<tr><td>${esc(p.x.name)} ${p.from}-го${p.soon === 0 ? " · сегодня" : ` · через ${p.soon} ${dayWord(p.soon)}`}${p.x.amount ? `<span class="pn">${rub(p.x.amount)}${p.x.cur ? ` (${fmtCur(p.x.orig, p.x.cur)})` : ""} на ${p.len} ${dayWord(p.len)}, до ${p.to}-го</span>` : ""}</td><td>${p.count ? `платежи ${rub(p.sum)}<span class="pn">${p.ps.map(q => esc(q.label) + " " + q.due + "-го").join(", ")}</span>` : "без платежей"}<span class="pn">на жизнь ≈ ${rub(p.life)}</span></td><td>${p.total != null ? `<b class="${p.total < 0 ? "neg" : ""}">${p.total < 0 ? "−" : ""}${rub(Math.abs(p.total))}</b><span class="pn">${p.total < 0 ? "не хватит" : "останется"}${p.carry ? `, с учётом ${rub(p.carry)} с прошлой` : ""}</span>` : ""}</td></tr>`).join("")}</table></div>` : "";
   return `<div class="budget" id="budgetPanel">${main}
     ${B.pays.length ? `<div class="bg-grid">
       ${B.balance != null ? `<div><span class="bl">Есть</span><b>${rub(B.balance)}</b></div>` : ""}
@@ -1052,7 +1109,17 @@ function budgetPanel(n){
       <div><span class="bl">Оплачено</span><b>${rub(B.paid)}</b> <span class="nw">из ${rub(B.total)}</span></div>
     </div>
     <div class="bar" title="Оплачено ${pct}%"><i style="width:${pct}%"></i></div>` : ""}
-    ${nextTxt}${planHtml}${per}${help}</div>`;
+    ${fxHtml(B)}${nextTxt}${planHtml}${per}${help}</div>`;
+}
+function fxHtml(B){
+  if(!B.fx) return "";
+  if(B.fx.noRate && !B.fx.cur.length) return `<div class="bg-note warn">Нет курса валют: подключитесь к интернету или добавьте строку <code>Курс: 92</code>.</div>`;
+  const parts = B.fx.cur.map(c => `1 ${CUR_SIGN[c]} = ${B.fx.rate[c].toLocaleString("ru-RU", {maximumFractionDigits:2})} ₽`).join(", ");
+  const own = B.fx.cur.every(c => B.fx.mine[c]);
+  const src = own ? "ваш курс" : FX.src === "cbr" ? `курс ЦБ на ${new Date(FX.at).toLocaleDateString("ru-RU", {day:"numeric", month:"short"})}`
+    : `рыночный курс на ${new Date(FX.at).toLocaleDateString("ru-RU", {day:"numeric", month:"short"})}, <a href="https://www.exchangerate-api.com" target="_blank" rel="noopener">ExchangeRate-API</a>`;
+  const inc = B.plan ? "" : "";
+  return `<div class="bg-note">Курс: ${parts} · ${src}${B.fx.noRate ? ". Для части сумм курса нет" : ""}</div>`;
 }
 function dueTag(info){
   if(!info) return "";
@@ -1294,6 +1361,8 @@ window.addEventListener("resize", () => { document.querySelectorAll("#blocks tex
 fixCur();
 expireTrash();
 render();
+loadFx();
+document.addEventListener("visibilitychange", () => { if(document.visibilityState === "visible") loadFx(); });
 
 if("serviceWorker" in navigator && location.protocol !== "file:"){
   navigator.serviceWorker.register("sw.js").catch(() => {});
