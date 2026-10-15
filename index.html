@@ -157,6 +157,25 @@ mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding
 .prio-pick button.on{background:var(--accent-soft);box-shadow:inset 0 0 0 1.5px var(--fg)}
 .prio-pick .lbl{font-size:12px;color:var(--muted);padding:0 4px}
 
+/* Бюджет */
+.chip.on-acc{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.budget{border:1px solid var(--line);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:12px;margin-bottom:14px;background:var(--bg)}
+.budget .bl{display:block;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.budget .bv{display:block;font-family:var(--f-title);font-size:32px;font-weight:600;line-height:1.15;font-variant-numeric:tabular-nums}
+.budget .bs{display:block;font-size:13px;color:var(--muted);margin-top:2px}
+.budget .neg{color:var(--red)}
+.bg-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+.bg-grid b{font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+.nw{white-space:nowrap}
+.bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+.bar i{display:block;height:100%;background:var(--ok);border-radius:3px}
+.bg-next{font-size:13px}
+.bg-next.late{color:var(--red)}
+.bg-help{font-size:12px;color:var(--muted);line-height:1.5}
+.bg-help code{font-family:inherit;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:0 4px;white-space:nowrap}
+.due{font-size:12px;color:var(--muted);white-space:nowrap;padding-top:4px;flex:none;font-variant-numeric:tabular-nums}
+.due.late{color:var(--red)} .due.soon{color:var(--yellow)} .due.paid{color:var(--ok)}
+
 /* Картинки */
 .block.image{display:block;position:relative;margin:6px 0}
 .block.image img{display:block;max-width:100%;max-height:420px;border-radius:var(--r);border:1px solid var(--line);cursor:zoom-in;background:var(--bg)}
@@ -616,6 +635,7 @@ function when(t){
     : d.toLocaleDateString("ru-RU",{day:"numeric",month:"short"});
 }
 function preview(n){
+  if(n.kind === "budget"){ const B = budgetOf(n); if(B.free != null) return when(n.updated) + " · Свободно " + rub(B.free); if(B.pays.length) return when(n.updated) + " · Ещё заплатить " + rub(B.unpaid); }
   const checks = n.blocks.filter(b => b.type === "check");
   const first = n.blocks.find(b => b.type !== "image" && b.text.trim());
   const imgs = n.blocks.filter(b => b.type === "image").length;
@@ -690,6 +710,10 @@ function renderList(){
 function renderEditor(){
   const n = note(), el = $("#editor");
   if(!n){ el.innerHTML = `<div class="placeholder">Выберите заметку или создайте новую</div>`; return; }
+  const isBudget = n.kind === "budget";
+  if(isBudget) budgetMonthReset(n);
+  const dueMap = {};
+  if(isBudget) budgetOf(n).pays.forEach(x => dueMap[x.b.id] = x);
   const checks = n.blocks.filter(b => b.type === "check");
   const del = confirmDel === "note"
     ? `<span class="confirm">Удалить заметку? <button class="chip danger" id="yesDelNote">Да</button><button class="chip" id="noDel">Нет</button></span>`
@@ -697,21 +721,23 @@ function renderEditor(){
   el.innerHTML = `<div class="ed-bar">
       <button class="chip back" id="back">← Назад</button>
       <button class="chip" id="addImg">Картинка</button>
+      <button class="chip${isBudget ? " on-acc" : ""}" id="budgetBtn" title="${isBudget ? "Сделать обычной заметкой" : "Считать как бюджет"}">Бюджет</button>
       <span class="prio-pick" aria-label="Метка заметки">${["red","yellow","green"].map(c =>
         `<button data-prio="${c}" class="${n.prio===c?"on":""}" title="${{red:"Срочно",yellow:"Скоро",green:"Не горит"}[c]}"><span class="pdot ${c}"></span></button>`).join("")}</span>
       <span class="sp"></span>
-      ${checks.length ? `<span class="progress">Выполнено ${checks.filter(b=>b.done).length} из ${checks.length}</span>` : ""}
+      ${checks.length && !isBudget ? `<span class="progress">Выполнено ${checks.filter(b=>b.done).length} из ${checks.length}</span>` : ""}
       ${del}
     </div>
     <div class="ed-body"><div class="ed-inner">
       <input class="title" id="title" placeholder="Название" value="${esc(n.title)}">
       <div class="meta">Изменено ${when(n.updated)}</div>
-      <div id="blocks">${n.blocks.map((b,i,a) => blockHTML(b,a.length)).join("")}</div>
+      ${isBudget ? budgetPanel(n) : ""}
+      <div id="blocks">${n.blocks.map((b,i,a) => blockHTML(b,a.length,dueMap[b.id])).join("")}</div>
     </div></div>`;
   el.querySelectorAll("textarea").forEach(autosize);
   hydrateImages();
 }
-function blockHTML(b, total){
+function blockHTML(b, total, due){
   if(b.type === "image"){
     const cached = b.path && urlCache[b.path] && urlCache[b.path].exp > Date.now() ? urlCache[b.path].url : null;
     const src = b.data || cached;
@@ -724,13 +750,107 @@ function blockHTML(b, total){
   const dot = b.prio ? `<button class="pb" title="Сменить метку" aria-label="Сменить метку"><span class="pdot ${b.prio}"></span></button>` : "";
   const ph = total === 1 && b.type === "text" ? "Пишите текст. [.] в начале строки — чекбокс, !! — срочно" : "";
   return `<div class="block ${b.type}${b.done?" done":""}${b.prio?" p-"+b.prio:""}" data-b="${b.id}">${dot}${box}
-    <textarea rows="1" placeholder="${ph}">${esc(b.text)}</textarea></div>`;
+    <textarea rows="1" placeholder="${ph}">${esc(b.text)}</textarea>${dueTag(due)}</div>`;
 }
 function autosize(t){ t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; }
 function render(){ renderFolders(); renderList(); renderEditor(); $("#app").classList.toggle("reading", reading && !!note()); }
 
 function touch(){ const n = note(); if(n) n.updated = Date.now(); changed(); }
 function refreshSide(){ renderList(); renderFolders(); }
+
+/* ================= Бюджет =================
+   Строки: «Есть: 85 000» — сколько денег сейчас; «Зарплата: 25» — день поступления (можно несколько);
+   платежи — чекбоксы с суммой: «[.] Аренда 35 000 до 5». Отмеченный платёж считается оплаченным. */
+const ym = () => { const d = new Date(); return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0"); };
+const rub = v => Math.round(v).toLocaleString("ru-RU") + " ₽";
+function parseMoney(str){
+  const t = str.replace(/(\d)[\s\u00a0](?=\d{3}(?!\d))/g, "$1");
+  const m = t.match(/(\d+(?:[.,]\d+)?)\s*(тыс|к|k)?(?![a-zа-яё])/i);
+  if(!m) return null;
+  const v = parseFloat(m[1].replace(",", "."));
+  return m[2] ? v * 1000 : v;
+}
+const DUE_RE = /(?:(?:^|[\s,;(—–-])до\s*|@\s*)(\d{1,2})(?:\s*-?\s*(?:го|е|ого))?(?:\s*числа)?|(\d{1,2})\s*-?\s*(?:го|е)?\s+числа/i;
+const BAL_RE = /^(есть|баланс|на руках|на карте|остаток)\s*:?\s*(.*)$/i;
+const PAY_RE = /^(зарплата|зп|аванс|получка|доход)\s*:?\s*(.*)$/i;
+function daysUntil(day){
+  const now = new Date(), today = now.getDate();
+  const dim = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const d = Math.min(day, dim);
+  if(d >= today) return d - today;
+  const next = new Date(now.getFullYear(), now.getMonth() + 1, Math.min(day, new Date(now.getFullYear(), now.getMonth() + 2, 0).getDate()));
+  return Math.round((next - new Date(now.getFullYear(), now.getMonth(), today)) / 864e5);
+}
+function budgetOf(n){
+  const today = new Date().getDate();
+  let balance = null; const payDays = []; const pays = [];
+  for(const b of n.blocks){
+    if(b.type === "image") continue;
+    const t = b.text.trim();
+    let m;
+    if(b.type === "text" && (m = t.match(BAL_RE))){ const v = parseMoney(m[2]); if(v != null) balance = v; continue; }
+    if(b.type === "text" && (m = t.match(PAY_RE))){ const d = m[2].match(/(\d{1,2})/); if(d && +d[1] >= 1 && +d[1] <= 31) payDays.push(+d[1]); continue; }
+    if(b.type !== "check") continue;
+    const dm = t.match(DUE_RE);
+    const due = dm ? +(dm[1] || dm[2]) : null;
+    const rest = dm ? t.replace(dm[0], " ") : t;
+    const amount = parseMoney(rest);
+    if(amount == null) continue;
+    const label = rest.replace(/(\d)[\s\u00a0](?=\d{3}(?!\d))/g, "$1").replace(/\d+(?:[.,]\d+)?\s*(тыс|к|k|₽|р\.?|руб\.?)?(?![a-zа-яё])/i, "").replace(/[—–\-:,.]+\s*$/, "").replace(/\s+/g, " ").trim() || "Платёж";
+    const overdue = !b.done && due != null && due < today;
+    pays.push({b, label, amount, due, done:b.done, overdue, left: due != null && due >= today ? due - today : null});
+  }
+  const total = pays.reduce((s, x) => s + x.amount, 0);
+  const paid = pays.filter(x => x.done).reduce((s, x) => s + x.amount, 0);
+  const unpaid = total - paid;
+  const daysToPay = payDays.length ? Math.min(...payDays.map(daysUntil)) : null;
+  const free = balance != null ? balance - unpaid : null;
+  const perDay = free != null && daysToPay ? free / daysToPay : null;
+  const open = pays.filter(x => !x.done).sort((a, b) => (b.overdue - a.overdue) || ((a.left ?? 99) - (b.left ?? 99)));
+  return {balance, pays, total, paid, unpaid, free, daysToPay, perDay, next: open[0] || null};
+}
+function dayWord(n){ const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? "день" : a >= 2 && a <= 4 && (b < 12 || b > 14) ? "дня" : "дней"; }
+function budgetPanel(n){
+  const B = budgetOf(n);
+  const help = `<div class="bg-help">Пишите строками: <code>Есть: 85 000</code> <code>Зарплата: 25</code>, платежи — <code>[.] Аренда 35 000 до 5</code>. Отметили галочку — платёж оплачен. Первого числа галочки сбрасываются сами.</div>`;
+  if(B.balance == null && !B.pays.length) return `<div class="budget" id="budgetPanel">${help}</div>`;
+  const main = B.free != null
+    ? `<div><span class="bl">Свободно</span><span class="bv${B.free < 0 ? " neg" : ""}">${rub(B.free)}</span>${
+        B.perDay != null ? `<span class="bs">≈ ${rub(Math.max(0, B.perDay))} в день · ${B.daysToPay} ${dayWord(B.daysToPay)} до зарплаты</span>`
+        : B.daysToPay === 0 ? `<span class="bs">Зарплата сегодня</span>` : ""}</div>`
+    : `<div><span class="bl">Свободно</span><span class="bs">Добавьте строку <b>Есть: сумма</b>, чтобы посчитать остаток</span></div>`;
+  const pct = B.total ? Math.round(B.paid / B.total * 100) : 0;
+  const nx = B.next;
+  const nextTxt = nx ? `<div class="bg-next${nx.overdue ? " late" : ""}">${nx.overdue ? "Просрочен" : "Ближайший"}: ${esc(nx.label)} — ${rub(nx.amount)}${
+      nx.overdue ? `, срок был ${nx.due}-го` : nx.left === 0 ? ", сегодня" : nx.left != null ? `, через ${nx.left} ${dayWord(nx.left)}` : ""}</div>`
+    : B.pays.length ? `<div class="bg-next">Все обязательные платежи этого месяца оплачены</div>` : "";
+  return `<div class="budget" id="budgetPanel">${main}
+    <div class="bg-grid">
+      ${B.balance != null ? `<div><span class="bl">Есть</span><b>${rub(B.balance)}</b></div>` : ""}
+      <div><span class="bl">Ещё заплатить</span><b>${rub(B.unpaid)}</b></div>
+      <div><span class="bl">Оплачено</span><b>${rub(B.paid)}</b> <span class="nw">из ${rub(B.total)}</span></div>
+    </div>
+    ${B.total ? `<div class="bar" title="Оплачено ${pct}%"><i style="width:${pct}%"></i></div>` : ""}
+    ${nextTxt}${help}</div>`;
+}
+function dueTag(info){
+  if(!info) return "";
+  if(info.done) return `<span class="due paid">оплачено</span>`;
+  if(info.overdue) return `<span class="due late">просрочен</span>`;
+  if(info.left === 0) return `<span class="due soon">сегодня</span>`;
+  if(info.left != null) return `<span class="due${info.left <= 3 ? " soon" : ""}">через ${info.left} ${dayWord(info.left)}</span>`;
+  return "";
+}
+/* Новый месяц — галочки платежей снимаются */
+function budgetMonthReset(n){
+  const now = ym();
+  if(!n.month){ n.month = now; return false; }
+  if(n.month === now) return false;
+  n.blocks.forEach(b => { if(b.type === "check") b.done = false; });
+  n.month = now; n.updated = Date.now(); changed();
+  return true;
+}
+const BUDGET_TEMPLATE = ["Есть: 50 000", "Зарплата: 25", "[.] Аренда 30 000 до 5", "[.] Связь и интернет 1 200 до 15", "[.] Коммуналка 6 000 до 20"];
 
 /* Строка «[.] слово» становится чекбоксом; «[x] слово» — отмеченным */
 const CHECK_RE = /^\[([.\sxх]?)\]\s/i;
@@ -762,6 +882,14 @@ $("#app").addEventListener("click", e => {
   if(t.dataset.go){ goTo(t.dataset.go); return; }
   if(id === "urgentBtn"){ view = view === "urgent" ? null : "urgent"; query = ""; $("#q").value = ""; reading = false; renderList(); $("#app").classList.toggle("reading", false); return; }
   if(id === "closeView"){ view = null; renderList(); return; }
+  if(id === "budgetBtn"){
+    const n = note();
+    if(n.kind === "budget"){ delete n.kind; redraw(); return; }
+    n.kind = "budget"; n.month = ym();
+    const empty = !n.blocks.some(b => b.type !== "image" && b.text.trim());
+    if(empty){ n.blocks = BUDGET_TEMPLATE.map(parseLine); if(!n.title.trim()) n.title = "Бюджет"; }
+    redraw(); return;
+  }
   if(t.dataset.prio){ const n = note(); n.prio = n.prio === t.dataset.prio ? null : t.dataset.prio; redraw(); return; }
   if(t.classList.contains("pb")){
     const n = note(), b = n.blocks.find(x => x.id === t.closest(".block").dataset.b);
@@ -860,6 +988,7 @@ $("#app").addEventListener("input", e => {
     redraw(b.id, Math.max(0, e.target.selectionStart - (val.length - p.text.length))); return;
   }
   b.text = val; autosize(e.target); touch(); refreshSide();
+  if(n.kind === "budget"){ const pnl = $("#budgetPanel"); if(pnl) pnl.outerHTML = budgetPanel(n); }
 });
 
 $("#app").addEventListener("keydown", e => {
