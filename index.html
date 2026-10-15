@@ -15,13 +15,14 @@
 :root{
   --bg:#f6f7f9; --panel:#ffffff; --line:#e3e6ec; --fg:#1d2330; --muted:#6b7385;
   --accent:#3554d1; --accent-soft:#e8ecfb; --done:#9aa1b0; --danger:#c0392b; --ok:#2e8b57;
+  --red:#d64545; --yellow:#d9a514; --green:#3a9a5b;
   --f-body:"Golos Text",system-ui,-apple-system,"Segoe UI",sans-serif;
   --f-title:"Literata",Georgia,"Times New Roman",serif;
   --r:8px; color-scheme:light;
 }
 @media (prefers-color-scheme:dark){:root{
   --bg:#14171e; --panel:#1b1f28; --line:#2b313d; --fg:#e6e9ef; --muted:#8e96a8;
-  --accent:#8aa2ff; --accent-soft:#252d4a; --done:#5d6578; --danger:#ff7b6b; --ok:#5fcf8f; color-scheme:dark}}
+  --accent:#8aa2ff; --accent-soft:#252d4a; --done:#5d6578; --danger:#ff7b6b; --ok:#5fcf8f; --red:#ff6b6b; --yellow:#f2c94c; --green:#5fcf8f; color-scheme:dark}}
 *{box-sizing:border-box}
 html,body{height:100%;margin:0}
 body{background:var(--bg);color:var(--fg);font-family:var(--f-body);font-size:15px;line-height:1.5;
@@ -132,6 +133,30 @@ hr{border:0;border-top:1px solid var(--line);margin:4px 0}
 .sec{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);padding:10px 10px 4px}
 .note.thread-row b{color:var(--accent)}
 
+/* Поиск и метки */
+.search{display:flex;gap:6px;padding:14px 16px 0}
+.search input{flex:1;min-width:0;padding:8px 10px;border:1px solid var(--line);border-radius:var(--r);background:var(--bg);color:var(--fg);font:inherit;font-size:14px}
+.search input::placeholder{color:var(--done)}
+.chip.urgent{display:flex;align-items:center;gap:6px;flex:none}
+.chip.urgent.on{border-color:var(--red);color:var(--red)}
+.list-inner{flex:1;min-height:0;display:flex;flex-direction:column}
+.pdot{display:inline-block;width:9px;height:9px;border-radius:50%;flex:none;background:var(--done)}
+.pdot.red{background:var(--red)} .pdot.yellow{background:var(--yellow)} .pdot.green{background:var(--green)}
+.note span.pdot{display:inline-block;overflow:visible}
+.note b .pdot{margin-right:7px;vertical-align:1px}
+.note .where{font-size:12px;color:var(--muted)}
+.note .hot{display:block;font-size:13px;color:var(--fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.note .hot .pdot{width:7px;height:7px;margin-right:6px;vertical-align:1px}
+mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding:0 1px}
+.block .pb{width:14px;height:26px;display:grid;place-items:center;flex:none;padding:0;margin-right:-4px}
+.block .pb:hover .pdot{transform:scale(1.3)}
+.block.p-red textarea{font-weight:500}
+.prio-pick{display:flex;align-items:center;gap:2px;padding:0 4px;border:1px solid var(--line);border-radius:6px;height:31px}
+.prio-pick button{width:24px;height:24px;border-radius:5px;display:grid;place-items:center}
+.prio-pick button:hover{background:var(--accent-soft)}
+.prio-pick button.on{background:var(--accent-soft);box-shadow:inset 0 0 0 1.5px var(--fg)}
+.prio-pick .lbl{font-size:12px;color:var(--muted);padding:0 4px}
+
 /* Картинки */
 .block.image{display:block;position:relative;margin:6px 0}
 .block.image img{display:block;max-width:100%;max-height:420px;border-radius:var(--r);border:1px solid var(--line);cursor:zoom-in;background:var(--bg)}
@@ -154,7 +179,10 @@ hr{border:0;border-top:1px solid var(--line);margin:4px 0}
 <body>
 <div class="app" id="app">
   <nav class="col folders" id="folders" aria-label="Папки и треды"></nav>
-  <section class="col list" id="list"></section>
+  <section class="col list" id="list">
+    <div class="search"><input id="q" type="search" placeholder="Поиск по всем заметкам" aria-label="Поиск по всем заметкам" autocomplete="off"><button class="chip urgent" id="urgentBtn" title="Срочное и скоро"><span class="pdot red"></span><span id="urgentN">0</span></button></div>
+    <div class="list-inner" id="listBody"></div>
+  </section>
   <section class="col editor" id="editor"></section>
 </div>
 <div class="viewer" id="viewer" hidden><img alt=""></div>
@@ -508,6 +536,72 @@ $("#importFile").addEventListener("change", async e => {
 
 /* ================= Интерфейс ================= */
 let reading = false, editing = null, confirmDel = null, lastFocus = null;
+let view = null, query = "";   // view: "urgent" — экран «Срочное»; query — строка поиска
+const PRIO_RANK = {red:3, yellow:2, green:1};
+const PRIO_NEXT = {red:"yellow", yellow:"green", green:null};
+/* Самая сильная метка заметки: своя или любой незакрытой строки */
+function notePrio(n){
+  let best = n.prio || null;
+  for(const b of n.blocks) if(b.prio && !(b.type === "check" && b.done) && (PRIO_RANK[b.prio] > (PRIO_RANK[best] || 0))) best = b.prio;
+  return best;
+}
+function everyNote(){
+  const out = [];
+  for(const f of state.folders){
+    f.notes.forEach(n => out.push({n, f, t:null}));
+    f.threads.forEach(t => t.notes.forEach(n => out.push({n, f, t})));
+  }
+  return out;
+}
+const whereOf = x => esc(x.f.name) + (x.t ? " › # " + esc(x.t.name) : "");
+function hl(text, q){
+  if(!q) return esc(text);
+  const low = text.toLowerCase(), ql = q.toLowerCase(); let i = 0, out = "", j;
+  while((j = low.indexOf(ql, i)) >= 0){ out += esc(text.slice(i, j)) + "<mark>" + esc(text.slice(j, j + q.length)) + "</mark>"; i = j + q.length; }
+  return out + esc(text.slice(i));
+}
+function urgentLists(){
+  const red = [], yellow = [];
+  for(const x of everyNote()){ const p = notePrio(x.n); if(p === "red") red.push(x); else if(p === "yellow") yellow.push(x); }
+  const by = (a, b) => b.n.updated - a.n.updated;
+  return {red:red.sort(by), yellow:yellow.sort(by)};
+}
+function renderResults(){
+  const el = $("#listBody");
+  const item = (x, extra) => `<button class="note ${x.n.id===state.cur.note?"on":""}" data-go="${x.n.id}"><b>${notePrio(x.n) ? `<span class="pdot ${notePrio(x.n)}"></span>` : ""}${hl(x.n.title || "Без названия", view ? "" : query.trim())}</b><span class="where">${whereOf(x)}</span>${extra}</button>`;
+  if(view === "urgent"){
+    const {red, yellow} = urgentLists();
+    const hot = n => n.blocks.filter(b => b.prio && b.text.trim() && !(b.type === "check" && b.done) && b.prio !== "green")
+      .sort((a, b) => PRIO_RANK[b.prio] - PRIO_RANK[a.prio]).slice(0, 3)
+      .map(b => `<span class="hot"><span class="pdot ${b.prio}"></span>${esc(b.text)}</span>`).join("");
+    const sec = (title, arr) => arr.length ? `<div class="sec">${title}</div>` + arr.map(x => item(x, hot(x.n))).join("") : "";
+    el.innerHTML = `<div class="list-head"><div class="hd"><h2>Срочное</h2></div><button class="icon-btn" id="closeView" title="Закрыть" aria-label="Закрыть">✕</button></div>
+      <div class="notes">${red.length || yellow.length ? sec("Срочно", red) + sec("Скоро", yellow)
+        : `<div class="empty">Здесь появятся заметки и строки с красной и жёлтой меткой. Начните строку с «!! » — она станет срочной, с «! » — жёлтой, с «~ » — зелёной.</div>`}</div>`;
+    return;
+  }
+  const q = query.trim().toLowerCase();
+  const found = [];
+  for(const x of everyNote()){
+    const inTitle = (x.n.title || "").toLowerCase().includes(q);
+    const line = x.n.blocks.find(b => b.type !== "image" && b.text.toLowerCase().includes(q));
+    if(inTitle || line) found.push({x, line});
+  }
+  found.sort((a, b) => b.x.n.updated - a.x.n.updated);
+  el.innerHTML = `<div class="list-head"><div class="hd"><h2>Найдено: ${found.length}</h2></div></div>
+    <div class="notes">${found.length ? found.slice(0, 100).map(r => item(r.x, r.line ? `<span class="hot">${hl(r.line.text, query.trim())}</span>` : "")).join("")
+      : `<div class="empty">Ничего не нашлось. Поиск идёт по названиям и тексту всех заметок во всех папках.</div>`}</div>`;
+}
+function updateUrgentBtn(){
+  const {red} = urgentLists();
+  $("#urgentN").textContent = red.length;
+  $("#urgentBtn").classList.toggle("on", view === "urgent");
+}
+function goTo(id){
+  const x = everyNote().find(y => y.n.id === id); if(!x) return;
+  state.cur = {folder:x.f.id, thread:x.t ? x.t.id : null, note:x.n.id};
+  confirmDel = null; reading = true; saveLocal(); render();
+}
 const folder = () => state.folders.find(f => f.id === state.cur.folder) || state.folders[0];
 const thread = () => { const f = folder(); return f && state.cur.thread ? f.threads.find(t => t.id === state.cur.thread) || null : null; };
 const place = () => thread() || folder();   // где лежат заметки, открытые сейчас
@@ -569,7 +663,9 @@ function removeImagesOf(notes){
 }
 
 function renderList(){
-  const f = folder(), t = thread(), p = place(), el = $("#list");
+  updateUrgentBtn();
+  if(view || query.trim()){ renderResults(); return; }
+  const f = folder(), t = thread(), p = place(), el = $("#listBody");
   if(!f){ el.innerHTML = `<div class="placeholder">Создайте первую папку кнопкой «+», например по названию игры</div>`; return; }
   const kind = t ? "thread" : "folder";
   const tools = confirmDel === kind
@@ -587,7 +683,7 @@ function renderList(){
   el.innerHTML = `<div class="list-head">${head}<div style="display:flex;gap:2px;flex:none">${tools}</div></div>
     <div class="list-actions"><button class="chip" id="addNote">+ Заметка</button>${t ? "" : `<button class="chip" id="addThread2">+ Тред</button>`}</div>
     <div class="notes">${threads}${notes.length ? notes.map(n =>
-      `<button class="note ${n.id===state.cur.note?"on":""}" data-n="${n.id}"><b>${esc(n.title || "Без названия")}</b><span>${esc(preview(n))}</span></button>`
+      `<button class="note ${n.id===state.cur.note?"on":""}" data-n="${n.id}"><b>${notePrio(n) ? `<span class="pdot ${notePrio(n)}"></span>` : ""}${esc(n.title || "Без названия")}</b><span>${esc(preview(n))}</span></button>`
     ).join("") : (threads ? "" : `<div class="empty">${t ? "В этом треде пока нет заметок." : "В этой папке пока нет заметок и тредов."}</div>`)}</div>`;
 }
 
@@ -601,6 +697,8 @@ function renderEditor(){
   el.innerHTML = `<div class="ed-bar">
       <button class="chip back" id="back">← Назад</button>
       <button class="chip" id="addImg">Картинка</button>
+      <span class="prio-pick" aria-label="Метка заметки">${["red","yellow","green"].map(c =>
+        `<button data-prio="${c}" class="${n.prio===c?"on":""}" title="${{red:"Срочно",yellow:"Скоро",green:"Не горит"}[c]}"><span class="pdot ${c}"></span></button>`).join("")}</span>
       <span class="sp"></span>
       ${checks.length ? `<span class="progress">Выполнено ${checks.filter(b=>b.done).length} из ${checks.length}</span>` : ""}
       ${del}
@@ -623,8 +721,9 @@ function blockHTML(b, total){
       <button class="del" title="Удалить картинку" aria-label="Удалить картинку">✕</button></div>`;
   }
   const box = b.type === "check" ? `<input type="checkbox" ${b.done?"checked":""} aria-label="Отметить">` : "";
-  const ph = total === 1 && b.type === "text" ? "Пишите текст. Строка, начатая с [.], станет чекбоксом" : "";
-  return `<div class="block ${b.type}${b.done?" done":""}" data-b="${b.id}">${box}
+  const dot = b.prio ? `<button class="pb" title="Сменить метку" aria-label="Сменить метку"><span class="pdot ${b.prio}"></span></button>` : "";
+  const ph = total === 1 && b.type === "text" ? "Пишите текст. [.] в начале строки — чекбокс, !! — срочно" : "";
+  return `<div class="block ${b.type}${b.done?" done":""}${b.prio?" p-"+b.prio:""}" data-b="${b.id}">${dot}${box}
     <textarea rows="1" placeholder="${ph}">${esc(b.text)}</textarea></div>`;
 }
 function autosize(t){ t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; }
@@ -635,10 +734,18 @@ function refreshSide(){ renderList(); renderFolders(); }
 
 /* Строка «[.] слово» становится чекбоксом; «[x] слово» — отмеченным */
 const CHECK_RE = /^\[([.\sxх]?)\]\s/i;
+const PRIO_RE = /^(!!|!|~)\s/;
+const PRIO_OF = {"!!":"red", "!":"yellow", "~":"green"};
 function parseLine(line){
-  const m = line.match(CHECK_RE);
-  if(m) return {id:uid(), type:"check", text:line.slice(m[0].length), done:/[xх]/i.test(m[1])};
-  return {id:uid(), type:"text", text:line, done:false};
+  const r = {id:uid(), type:"text", text:line, done:false};
+  for(let k = 0; k < 2; k++){
+    let m = r.text.match(CHECK_RE);
+    if(m && r.type === "text"){ r.type = "check"; r.done = /[xх]/i.test(m[1]); r.text = r.text.slice(m[0].length); continue; }
+    m = r.text.match(PRIO_RE);
+    if(m && !r.prio){ r.prio = PRIO_OF[m[1]]; r.text = r.text.slice(m[0].length); continue; }
+    break;
+  }
+  return r;
 }
 function focusBlock(id, pos){
   const t = document.querySelector(`[data-b="${id}"] textarea`); if(!t) return;
@@ -652,6 +759,15 @@ $("#app").addEventListener("click", e => {
   if(img){ openViewer(img.src); return; }
   const t = e.target.closest("button"); if(!t) return;
   const id = t.id, now = Date.now();
+  if(t.dataset.go){ goTo(t.dataset.go); return; }
+  if(id === "urgentBtn"){ view = view === "urgent" ? null : "urgent"; query = ""; $("#q").value = ""; reading = false; renderList(); $("#app").classList.toggle("reading", false); return; }
+  if(id === "closeView"){ view = null; renderList(); return; }
+  if(t.dataset.prio){ const n = note(); n.prio = n.prio === t.dataset.prio ? null : t.dataset.prio; redraw(); return; }
+  if(t.classList.contains("pb")){
+    const n = note(), b = n.blocks.find(x => x.id === t.closest(".block").dataset.b);
+    b.prio = PRIO_NEXT[b.prio]; if(!b.prio) delete b.prio; redraw(); return;
+  }
+  if(t.dataset.f || t.dataset.t){ view = null; query = ""; $("#q").value = ""; }
   if(t.dataset.f){
     state.cur.folder = t.dataset.f; state.cur.thread = null; state.cur.note = folder().notes[0]?.id || null;
     confirmDel = null; reading = false; saveLocal(); render(); return;
@@ -712,6 +828,9 @@ $("#app").addEventListener("click", e => {
   }
 });
 
+$("#q").addEventListener("input", e => { query = e.target.value; view = null; renderList(); });
+$("#q").addEventListener("keydown", e => { if(e.key === "Escape"){ e.target.value = ""; query = ""; renderList(); } });
+
 $("#app").addEventListener("focusin", e => { const b = e.target.closest && e.target.closest("#blocks .block"); if(b) lastFocus = b.dataset.b; });
 
 $("#app").addEventListener("input", e => {
@@ -726,14 +845,18 @@ $("#app").addEventListener("input", e => {
     const lines = val.split(/\r?\n/);
     const first = parseLine(lines[0]);
     if(b.type === "text"){ b.type = first.type; b.done = first.done; }
+    if(first.prio && !b.prio) b.prio = first.prio;
     b.text = first.text;
     const rest = lines.slice(1).map(parseLine);
     n.blocks.splice(i + 1, 0, ...rest);
     const last = rest[rest.length - 1];
     redraw(last.id, last.text.length); return;
   }
-  if(b.type === "text" && CHECK_RE.test(val)){
-    const p = parseLine(val); b.type = "check"; b.text = p.text; b.done = p.done;
+  if((b.type === "text" && CHECK_RE.test(val)) || (!b.prio && PRIO_RE.test(val))){
+    const p = parseLine(val);
+    if(p.type === "check" && b.type === "text"){ b.type = "check"; b.done = p.done; }
+    if(p.prio && !b.prio) b.prio = p.prio;
+    b.text = p.text;
     redraw(b.id, Math.max(0, e.target.selectionStart - (val.length - p.text.length))); return;
   }
   b.text = val; autosize(e.target); touch(); refreshSide();
@@ -760,6 +883,7 @@ $("#app").addEventListener("keydown", e => {
     n.blocks.splice(i + 1, 0, nb); redraw(nb.id, 0); return;
   }
   if(e.key === "Backspace" && collapsed && start === 0){
+    if(b.prio){ e.preventDefault(); delete b.prio; redraw(b.id, 0); return; }
     if(b.type === "check"){ e.preventDefault(); b.type = "text"; b.done = false; redraw(b.id, 0); return; }
     const prev = n.blocks[i - 1];
     if(prev && prev.type !== "image"){
