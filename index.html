@@ -157,6 +157,13 @@ mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding
 .prio-pick button.on{background:var(--accent-soft);box-shadow:inset 0 0 0 1.5px var(--fg)}
 .prio-pick .lbl{font-size:12px;color:var(--muted);padding:0 4px}
 
+/* Корзина */
+.trash-btn.on{background:var(--accent-soft);color:var(--accent)}
+.trash-btn .ti{width:8px;display:grid;place-items:center;font-size:11px;filter:grayscale(1)}
+.note.trash-row{display:flex;align-items:center;gap:10px;cursor:default}
+.note.trash-row:hover{background:none}
+.trash-row .tr-txt{flex:1;min-width:0}
+
 /* Бюджет */
 .chip.on-acc{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
 .budget{border:1px solid var(--line);border-radius:12px;padding:16px;display:flex;flex-direction:column;gap:12px;margin-bottom:14px;background:var(--bg)}
@@ -261,6 +268,7 @@ function normalize(s){
   }
   if(!Array.isArray(s.folders)) return null;
   s.deleted = s.deleted || {};
+  s.trash = Array.isArray(s.trash) ? s.trash : [];
   s.cur = s.cur || {};
   const fixNotes = ns => (ns || []).map(n => ({...n, blocks:n.blocks || [], updated:n.updated || 0}));
   s.folders = s.folders.map(f => ({...f, updated:f.updated || 0, notes:fixNotes(f.notes),
@@ -304,9 +312,15 @@ function merge(a, b){
   });
   const month = Date.now() - 30*864e5;
   for(const k of Object.keys(deleted)) if(deleted[k] < month) delete deleted[k];
-  return {folders, deleted, cur:a.cur};
+  // корзина: объединяем, убираем восстановленное и записи старше 30 дней
+  const alive = new Set();
+  folders.forEach(f => { alive.add(f.id); f.notes.forEach(n => alive.add(n.id)); f.threads.forEach(t => { alive.add(t.id); t.notes.forEach(n => alive.add(n.id)); }); });
+  const tm = new Map();
+  for(const e of [...(a.trash || []), ...(b.trash || [])]) if(!tm.has(e.id) || tm.get(e.id).at < e.at) tm.set(e.id, e);
+  const trash = [...tm.values()].filter(e => !alive.has(e.id) && e.at > month).sort((x, y) => y.at - x.at);
+  return {folders, deleted, trash, cur:a.cur};
 }
-const strip = s => JSON.stringify({folders:s.folders, deleted:s.deleted});
+const strip = s => JSON.stringify({folders:s.folders, deleted:s.deleted, trash:s.trash});
 
 /* ================= Синхронизация ================= */
 const CFG = window.NOTES_CONFIG || {};
@@ -352,7 +366,7 @@ async function doSync(){
     const before = strip(state);
     const merged = remote ? merge(state, remote) : state;
     if(!remote || strip(merged) !== strip(remote)){
-      const {error: e2} = await sb.from("notes_state").upsert({user_id: session.user.id, data: {folders:merged.folders, deleted:merged.deleted}, updated_at: new Date().toISOString()});
+      const {error: e2} = await sb.from("notes_state").upsert({user_id: session.user.id, data: {folders:merged.folders, deleted:merged.deleted, trash:merged.trash}, updated_at: new Date().toISOString()});
       if(e2) throw e2;
     }
     if(strip(merged) !== before) applyRemote(merged);
@@ -374,7 +388,7 @@ function fixCur(){
 /* Применить пришедшие изменения, не сбивая курсор, если открытая заметка не поменялась */
 function applyRemote(merged){
   const curBefore = JSON.stringify(note() || null);
-  state.folders = merged.folders; state.deleted = merged.deleted;
+  state.folders = merged.folders; state.deleted = merged.deleted; state.trash = merged.trash;
   fixCur(); saveLocal();
   const editing = document.activeElement && $("#editor").contains(document.activeElement);
   if(editing && JSON.stringify(note() || null) === curBefore){ renderFolders(); renderList(); }
@@ -546,7 +560,7 @@ $("#importFile").addEventListener("change", async e => {
     const s = normalize(JSON.parse(await f.text()));
     if(!s) throw new Error();
     const merged = merge(state, s);
-    state.folders = merged.folders; state.deleted = merged.deleted;
+    state.folders = merged.folders; state.deleted = merged.deleted; state.trash = merged.trash;
     fixCur(); changed(); render();
     m.className = "msg ok"; m.textContent = "Заметки из файла добавлены.";
   }catch(err){ m.className = "msg err"; m.textContent = "Это не файл копии заметок."; }
@@ -659,7 +673,7 @@ function renderFolders(){
     h += `<button class="folder sub add-thread" id="addThread"><span class="name">+ Новый тред</span></button>`;
   }
   h += `<button class="icon-btn add-folder-m" id="addFolderM" aria-label="Новая папка">+</button>` +
-    `<div class="foot"><button class="sync" id="syncBtn"></button></div>`;
+    `<div class="foot"><button class="sync trash-btn${view === "trash" ? " on" : ""}" id="trashBtn"><span class="ti">🗑</span><span>Корзина${(state.trash || []).length ? " · " + state.trash.length : ""}</span></button><button class="sync" id="syncBtn"></button></div>`;
   el.innerHTML = h;
   renderSync();
   const inp = $("#nameInput");
@@ -676,6 +690,75 @@ function renderFolders(){
   }
 }
 
+/* ================= Корзина ================= */
+const TRASH_DAYS = 30;
+function toTrash(kind, item, from){
+  const now = Date.now();
+  state.trash = state.trash || [];
+  state.trash.unshift({id:item.id, kind, at:now, from, item:JSON.parse(JSON.stringify(item))});
+  const ids = [item.id];
+  if(kind === "folder"){ item.notes.forEach(n => ids.push(n.id)); item.threads.forEach(t => { ids.push(t.id); t.notes.forEach(n => ids.push(n.id)); }); }
+  if(kind === "thread") item.notes.forEach(n => ids.push(n.id));
+  ids.forEach(id => state.deleted[id] = now);
+}
+function trashNotes(e){
+  const it = e.item;
+  return e.kind === "note" ? [it] : e.kind === "thread" ? it.notes : [...it.notes, ...it.threads.flatMap(t => t.notes)];
+}
+/* Восстановление: свежая дата правки перекрывает отметку об удалении на всех устройствах */
+function restore(id){
+  const i = state.trash.findIndex(e => e.id === id); if(i < 0) return;
+  const e = state.trash[i], it = JSON.parse(JSON.stringify(e.item)), now = Date.now();
+  const stamp = x => { x.updated = now; delete state.deleted[x.id]; };
+  const ensureFolder = () => {
+    let f = state.folders.find(x => x.id === e.from?.folder);
+    if(!f){ f = state.folders[0]; }
+    if(!f){ f = {id:uid(), name:"Восстановленное", updated:now, notes:[], threads:[]}; state.folders.push(f); }
+    return f;
+  };
+  if(e.kind === "folder"){
+    stamp(it); it.notes.forEach(stamp); it.threads.forEach(t => { stamp(t); t.notes.forEach(stamp); });
+    state.folders.push(it); state.cur = {folder:it.id, thread:null, note:it.notes[0]?.id || null};
+  } else if(e.kind === "thread"){
+    stamp(it); it.notes.forEach(stamp);
+    const f = ensureFolder(); f.threads.push(it); state.cur = {folder:f.id, thread:it.id, note:it.notes[0]?.id || null};
+  } else {
+    stamp(it);
+    const f = ensureFolder(); const t = f.threads.find(x => x.id === e.from?.thread);
+    (t || f).notes.push(it); state.cur = {folder:f.id, thread:t ? t.id : null, note:it.id};
+  }
+  state.trash.splice(i, 1);
+  view = null; reading = e.kind === "note"; changed(); render();
+}
+function purgeTrash(entries){
+  removeImagesOf(entries.flatMap(trashNotes));
+  const ids = new Set(entries.map(e => e.id));
+  state.trash = state.trash.filter(e => !ids.has(e.id));
+  changed(); render();
+}
+/* записи старше 30 дней удаляются насовсем вместе с картинками */
+function expireTrash(){
+  const old = (state.trash || []).filter(e => e.at < Date.now() - TRASH_DAYS * 864e5);
+  if(old.length) purgeTrash(old);
+}
+function ago(t){
+  const d = Math.floor((Date.now() - t) / 864e5);
+  return d === 0 ? "сегодня" : d === 1 ? "вчера" : `${d} ${dayWord(d)} назад`;
+}
+let confirmEmpty = false;
+function renderTrash(){
+  const el = $("#listBody"), tr = state.trash || [];
+  const kindName = {note:"Заметка", thread:"Тред", folder:"Папка"};
+  const name = e => e.kind === "thread" ? "# " + (e.item.name || "") : (e.kind === "note" ? (e.item.title || "Без названия") : e.item.name);
+  const inner = e => e.kind === "note" ? "" : e.kind === "thread" ? ` · заметок: ${e.item.notes.length}` : ` · тредов: ${e.item.threads.length}, заметок: ${trashNotes(e).length}`;
+  el.innerHTML = `<div class="list-head"><div class="hd"><h2>Корзина</h2></div><button class="icon-btn" id="closeView" title="Закрыть" aria-label="Закрыть">✕</button></div>
+    ${tr.length ? `<div class="list-actions">${confirmEmpty
+      ? `<span class="confirm">Удалить всё насовсем? <button class="chip danger" id="yesEmpty">Да</button><button class="chip" id="noEmpty">Нет</button></span>`
+      : `<button class="chip danger" id="emptyTrash">Очистить корзину</button>`}</div>` : ""}
+    <div class="notes">${tr.length ? tr.map(e => `<div class="note trash-row"><div class="tr-txt"><b>${esc(name(e))}</b><span>${kindName[e.kind]}${inner(e)} · удалено ${ago(e.at)}</span></div><button class="chip" data-restore="${e.id}">Восстановить</button></div>`).join("")
+      : `<div class="empty">Корзина пуста. Удалённые заметки, треды и папки хранятся здесь ${TRASH_DAYS} дней.</div>`}</div>`;
+}
+
 function removeImagesOf(notes){
   if(!sb || !session) return;
   const paths = notes.flatMap(n => n.blocks.filter(b => b.type === "image" && b.path).map(b => b.path));
@@ -684,12 +767,13 @@ function removeImagesOf(notes){
 
 function renderList(){
   updateUrgentBtn();
+  if(view === "trash"){ renderTrash(); return; }
   if(view || query.trim()){ renderResults(); return; }
   const f = folder(), t = thread(), p = place(), el = $("#listBody");
   if(!f){ el.innerHTML = `<div class="placeholder">Создайте первую папку кнопкой «+», например по названию игры</div>`; return; }
   const kind = t ? "thread" : "folder";
   const tools = confirmDel === kind
-    ? `<span class="confirm">${t ? "Удалить тред?" : "Удалить папку со всеми тредами?"} <button class="chip danger" id="yesDel">Да</button><button class="chip" id="noDel">Нет</button></span>`
+    ? `<span class="confirm">${t ? "Удалить тред в корзину?" : "Удалить папку в корзину?"} <button class="chip danger" id="yesDel">Да</button><button class="chip" id="noDel">Нет</button></span>`
     : `<button class="icon-btn" id="renameCur" title="Переименовать" aria-label="Переименовать">✎</button><button class="icon-btn" id="delCur" title="Удалить" aria-label="Удалить">✕</button>`;
   const head = t
     ? `<div class="hd"><button class="crumb" data-f="${f.id}">${esc(f.name)}</button><h2># ${esc(t.name)}</h2></div>`
@@ -716,7 +800,7 @@ function renderEditor(){
   if(isBudget) budgetOf(n).pays.forEach(x => dueMap[x.b.id] = x);
   const checks = n.blocks.filter(b => b.type === "check");
   const del = confirmDel === "note"
-    ? `<span class="confirm">Удалить заметку? <button class="chip danger" id="yesDelNote">Да</button><button class="chip" id="noDel">Нет</button></span>`
+    ? `<span class="confirm">В корзину? <button class="chip danger" id="yesDelNote">Да</button><button class="chip" id="noDel">Нет</button></span>`
     : `<button class="chip danger" id="delNote">Удалить</button>`;
   el.innerHTML = `<div class="ed-bar">
       <button class="chip back" id="back">← Назад</button>
@@ -880,8 +964,13 @@ $("#app").addEventListener("click", e => {
   const t = e.target.closest("button"); if(!t) return;
   const id = t.id, now = Date.now();
   if(t.dataset.go){ goTo(t.dataset.go); return; }
-  if(id === "urgentBtn"){ view = view === "urgent" ? null : "urgent"; query = ""; $("#q").value = ""; reading = false; renderList(); $("#app").classList.toggle("reading", false); return; }
-  if(id === "closeView"){ view = null; renderList(); return; }
+  if(id === "urgentBtn"){ view = view === "urgent" ? null : "urgent"; query = ""; $("#q").value = ""; reading = false; render(); return; }
+  if(id === "closeView"){ view = null; confirmEmpty = false; renderList(); renderFolders(); return; }
+  if(id === "trashBtn"){ view = view === "trash" ? null : "trash"; confirmEmpty = false; query = ""; $("#q").value = ""; reading = false; render(); return; }
+  if(t.dataset.restore){ restore(t.dataset.restore); return; }
+  if(id === "emptyTrash"){ confirmEmpty = true; renderList(); return; }
+  if(id === "noEmpty"){ confirmEmpty = false; renderList(); return; }
+  if(id === "yesEmpty"){ confirmEmpty = false; purgeTrash([...state.trash]); return; }
   if(id === "budgetBtn"){
     const n = note();
     if(n.kind === "budget"){ delete n.kind; redraw(); return; }
@@ -922,13 +1011,12 @@ $("#app").addEventListener("click", e => {
   if(id === "yesDel"){
     const f = folder(), th = thread();
     if(th){
-      state.deleted[th.id] = now; th.notes.forEach(n => state.deleted[n.id] = now); removeImagesOf(th.notes);
+      toTrash("thread", th, {folder:f.id});
       f.threads = f.threads.filter(x => x.id !== th.id);
       state.cur.thread = null; state.cur.note = f.notes[0]?.id || null;
     } else {
       const ns = [...f.notes, ...f.threads.flatMap(x => x.notes)];
-      state.deleted[f.id] = now; f.threads.forEach(x => state.deleted[x.id] = now); ns.forEach(n => state.deleted[n.id] = now);
-      removeImagesOf(ns);
+      toTrash("folder", f, {});
       state.folders = state.folders.filter(x => x.id !== f.id);
       state.cur = {folder:state.folders[0]?.id || null, thread:null, note:null};
     }
@@ -941,7 +1029,7 @@ $("#app").addEventListener("click", e => {
   }
   if(id === "delNote"){ confirmDel = "note"; renderEditor(); return; }
   if(id === "yesDelNote"){
-    const p = place(), n = note(); state.deleted[n.id] = now; removeImagesOf([n]);
+    const p = place(), n = note(); toTrash("note", n, {folder:folder().id, thread:thread()?.id || null});
     p.notes = p.notes.filter(x => x.id !== n.id); state.cur.note = null;
     confirmDel = null; reading = false; changed(); render(); return;
   }
@@ -956,7 +1044,7 @@ $("#app").addEventListener("click", e => {
   }
 });
 
-$("#q").addEventListener("input", e => { query = e.target.value; view = null; renderList(); });
+$("#q").addEventListener("input", e => { query = e.target.value; const was = view; view = null; renderList(); if(was === "trash") renderFolders(); });
 $("#q").addEventListener("keydown", e => { if(e.key === "Escape"){ e.target.value = ""; query = ""; renderList(); } });
 
 $("#app").addEventListener("focusin", e => { const b = e.target.closest && e.target.closest("#blocks .block"); if(b) lastFocus = b.dataset.b; });
@@ -1067,6 +1155,7 @@ $("#app").addEventListener("mousedown", e => {
 window.addEventListener("resize", () => { document.querySelectorAll("#blocks textarea").forEach(autosize); closeMenu(); });
 
 fixCur();
+expireTrash();
 render();
 
 if("serviceWorker" in navigator && location.protocol !== "file:"){
