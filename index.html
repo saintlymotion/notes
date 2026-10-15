@@ -228,16 +228,28 @@ mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding
 .plan td:nth-child(3){text-align:right;color:var(--muted);width:56px;white-space:nowrap;padding-left:8px}
 .plan .pn{display:block;font-size:12px;color:var(--muted);white-space:normal}
 .plan tr.inc td{font-weight:600}
+.plan tr.inc .pn{font-weight:400}
 .plan tr.tot td{font-weight:600;color:var(--ok)}
 .plan tr.tot.neg td, .plan .neg{color:var(--red)}
 .bg-note{font-size:13px}
 .bg-note.warn{color:var(--red)}
 .bg-note a{color:var(--accent)}
-.bg-note code{font-family:inherit;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:0 4px;white-space:nowrap}
+.bg-note code,.goal .pn code{font-family:inherit;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:0 4px;white-space:nowrap}
 .bg-help{font-size:12px;color:var(--muted);line-height:1.5}
 .bg-help code{font-family:inherit;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:0 4px;white-space:nowrap}
 .due{font-size:12px;color:var(--muted);white-space:nowrap;padding-top:4px;flex:none;font-variant-numeric:tabular-nums}
 .due.late{color:var(--red)} .due.soon{color:var(--yellow)} .due.paid{color:var(--ok)}
+/* Траты и цели */
+.bg-today{font-size:13px}
+.bg-today.neg{color:var(--red)}
+.goal{display:flex;flex-direction:column;gap:5px;padding:8px 0;border-bottom:1px solid var(--line)}
+.goal:last-of-type{border-bottom:0}
+.g-top{display:flex;justify-content:space-between;align-items:baseline;gap:10px;font-size:14px}
+.g-top b{font-weight:600;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.g-top span{font-variant-numeric:tabular-nums;white-space:nowrap;color:var(--muted);font-size:13px}
+.goal .pn{font-size:12px;color:var(--muted)}
+.goal .pn.neg{color:var(--red)}
+.goal.reached .bar i{background:var(--accent)}
 
 /* Картинки */
 .block.image{display:block;position:relative;margin:6px 0}
@@ -1071,10 +1083,10 @@ function renderEditor(){
   const n = note(), el = $("#editor");
   if(!n){ el.innerHTML = `<div class="placeholder"><div class="ph-in">${mascotSVG(mascotKind, 110)}<div>Выберите заметку или создайте новую</div></div></div>`; return; }
   const isBudget = n.kind === "budget";
-  if(isBudget) budgetMonthReset(n);
+  if(isBudget){ budgetMonthReset(n); if(syncMoney(n)) changed(); }
   else n.blocks.forEach(b => { if(b.habit) refreshHabit(b); });
-  const dueMap = {};
-  if(isBudget) budgetOf(n).pays.forEach(x => dueMap[x.b.id] = x);
+  const tagMap = {};
+  if(isBudget){ const B = budgetOf(n); B.pays.forEach(x => tagMap[x.b.id] = dueTag(x)); Object.assign(tagMap, B.tags); }
   const checks = n.blocks.filter(b => b.type === "check");
   const del = confirmDel === "note"
     ? `<span class="confirm">В корзину? <button class="chip danger" id="yesDelNote">Да</button><button class="chip" id="noDel">Нет</button></span>`
@@ -1094,12 +1106,12 @@ function renderEditor(){
       <input class="title" id="title" placeholder="Название" value="${esc(n.title)}">
       <div class="meta">Изменено ${when(n.updated)}</div>
       ${isBudget ? budgetPanel(n) : ""}
-      <div id="blocks">${n.blocks.map((b,i,a) => blockHTML(b,a.length,dueMap[b.id])).join("")}</div>
+      <div id="blocks">${n.blocks.map((b,i,a) => blockHTML(b,a.length,tagMap[b.id])).join("")}</div>
     </div></div>`;
   el.querySelectorAll("textarea").forEach(autosize);
   hydrateImages();
 }
-function blockHTML(b, total, due){
+function blockHTML(b, total, tag){
   if(b.type === "image"){
     const cached = b.path && urlCache[b.path] && urlCache[b.path].exp > Date.now() ? urlCache[b.path].url : null;
     const src = b.data || cached;
@@ -1112,7 +1124,7 @@ function blockHTML(b, total, due){
   const dot = b.prio ? `<button class="pb" title="Сменить метку" aria-label="Сменить метку"><span class="pdot ${b.prio}"></span></button>` : "";
   const ph = total === 1 && b.type === "text" ? "Пишите текст. [.] в начале строки — чекбокс, !! — срочно" : "";
   return `<div class="block ${b.type}${b.done?" done":""}${b.prio?" p-"+b.prio:""}" data-b="${b.id}">${dot}${box}
-    <textarea rows="1" placeholder="${ph}">${esc(b.text)}</textarea>${typeof habitTag === "function" && b.habit ? habitTag(b) : ""}${due ? dueTag(due) : dateTag(b)}</div>`;
+    <textarea rows="1" placeholder="${ph}">${esc(b.text)}</textarea>${typeof habitTag === "function" && b.habit ? habitTag(b) : ""}${tag != null ? tag : dateTag(b)}</div>`;
 }
 function autosize(t){ t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; }
 function render(){
@@ -1122,7 +1134,7 @@ function render(){
   requestAnimationFrame(() => document.querySelectorAll("#blocks textarea").forEach(autosize));
 }
 
-function touch(){ const n = note(); if(n){ n.updated = Date.now(); if(n.kind !== "budget") n.blocks.forEach(b => { syncHabit(b); syncDate(b); }); } changed(); }
+function touch(){ const n = note(); if(n){ n.updated = Date.now(); if(n.kind !== "budget") n.blocks.forEach(b => { syncHabit(b); syncDate(b); }); else syncMoney(n); } changed(); }
 function refreshSide(){ renderList(); renderFolders(); }
 
 /* ================= Бюджет =================
@@ -1192,10 +1204,106 @@ const RATE_RE = /^курс\s*(\$|usd|долл\S*|€|eur|евро)?\s*:?\s*(.*)$
 const CUR_SIGN = {USD:"$", EUR:"€"};
 const fmtCur = (v, cur) => (Math.round(v * 100) / 100).toLocaleString("ru-RU") + " " + CUR_SIGN[cur];
 
+/* ================= Траты и цели =================
+   Траты: «- 450 кофе», «- 1 200 такси @вчера». Дата ставится сама, когда строку написали.
+   Категория угадывается по слову: продукты, такси, кино… Траты после обновления строки «Есть» вычитаются из неё.
+   Цели: «Цель: Отпуск 120 000 к 01.06», «Цель: Подушка 100 000, есть 20 000». Пополнение: «+ 5 000 отпуск». */
+const EXP_RE = /^(?:[-−–—]\s*|(?:трата|расход)\s*:?\s*)(.+)$/i;
+const DEP_RE = /^\+\s*(.+)$/;
+const GOAL_RE = /^цель\s*:?\s*(.+)$/i;
+const ETOK_RE = /(?:^|\s)@(сегодня|вчера|позавчера|\d{1,2}\.\d{1,2}(?:\.\d{2,4})?|\d{1,2}\s+(?:янв|фев|мар|апр|ма[яй]|июн|июл|авг|сен|окт|ноя|дек)[а-яё]*)(?=$|[\s,.;!?)])/i;
+const CATS = [
+  ["food", "Еда", /продукт|еда|еду|магазин|супермаркет|пят[её]рочк|перекр[её]ст|магнит|вкусвилл|ашан|дикси|лавк|доставк|хлеб|молок|мяс|овощ|фрукт|обед|ужин|завтрак|перекус|столов|шаурм|пицц|суши|роллы|бургер|кофе|чай|вод[аы]|сладк/i],
+  ["transport", "Транспорт", /такси|метро|автобус|трамва|троллейбус|электричк|маршрутк|проезд|транспорт|бензин|заправк|топлив|парковк|каршер|самокат|тройк|поезд|ж\/д/i],
+  ["fun", "Развлечения", /кино|театр|концерт|музе|бар(?![а-яё])|паб|пив|кафе|ресторан|развлеч|игр|подписк|steam|стим|боулинг|клуб|вечеринк|книг|хобби|прогулк|аттракц/i],
+  ["other", "Прочее", null]
+];
+const CAT_NAME = Object.fromEntries(CATS.map(c => [c[0], c[1]]));
+const catOf = label => (CATS.find(c => c[2] && c[2].test(label)) || CATS[3])[0];
+const MONTH_IN = ["январе","феврале","марте","апреле","мае","июне","июле","августе","сентябре","октябре","ноябре","декабре"];
+function monthWord(n){ const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? "месяц" : a >= 2 && a <= 4 && (b < 12 || b > 14) ? "месяца" : "месяцев"; }
+/* название без суммы и валюты: «Аренда 35 000» → «Аренда» */
+const labelOf = s => unThousand(s).replace(/\d+(?:[.,]\d+)?\s*(тыс|к|k|₽|р\.?|руб\.?)?(?![a-zа-яё])/i, " ")
+  .replace(/\$|€|\busd\b|\beur\b|евро|долл\S*|дол\.|бакс\S*/gi, " ").replace(/\s+/g, " ").replace(/^[\s—–\-:,.;+]+|[\s—–\-:,.;+]+$/g, "");
+/* дата траты в прошлом: «@вчера», «@14.10», «@3 окт» */
+function pastDate(tok){
+  const t = tok.toLowerCase(), now = day0(), add = k => new Date(now.getFullYear(), now.getMonth(), now.getDate() + k);
+  if(t === "сегодня") return now;
+  if(t === "вчера") return add(-1);
+  if(t === "позавчера") return add(-2);
+  let m = t.match(/^(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?$/);
+  if(m){
+    let y = m[3] ? +m[3] : now.getFullYear(); if(y < 100) y += 2000;
+    const d = new Date(y, +m[2] - 1, +m[1]);
+    return !m[3] && d > now ? new Date(y - 1, +m[2] - 1, +m[1]) : d;
+  }
+  m = t.match(/^(\d{1,2})\s+([а-яё]+)/);
+  if(m){
+    const mi = MON.findIndex(x => m[2].startsWith(x)); if(mi < 0) return null;
+    const d = new Date(now.getFullYear(), mi, +m[1]);
+    return d > now ? new Date(now.getFullYear() - 1, mi, +m[1]) : d;
+  }
+  return null;
+}
+/* срок цели в будущем: «к 01.06», «до 1 июня», «к июню», «к декабрю 2027» */
+function futureDate(tok){
+  const t = tok.toLowerCase().trim(), now = day0();
+  let m = t.match(/^(\d{1,2})\.(\d{1,2})(?:\.(\d{2,4}))?$/);
+  if(m){
+    let y = m[3] ? +m[3] : now.getFullYear(); if(y < 100) y += 2000;
+    const d = new Date(y, +m[2] - 1, +m[1]);
+    return !m[3] && d < now ? new Date(y + 1, +m[2] - 1, +m[1]) : d;
+  }
+  m = t.match(/^(?:(\d{1,2})\s+)?([а-яё]+)(?:\s+(\d{4}))?$/);
+  if(!m) return null;
+  const mi = MON.findIndex(x => m[2].startsWith(x)); if(mi < 0) return null;
+  const day = m[1] ? +m[1] : 1;
+  let d = new Date(m[3] ? +m[3] : now.getFullYear(), mi, day);
+  if(!m[3] && d < now) d = new Date(now.getFullYear() + 1, mi, day);
+  return d;
+}
+const GOAL_DUE_RE = /(?:^|[\s,;(])(?:к|до)\s+(\d{1,2}\.\d{1,2}(?:\.\d{2,4})?|(?:\d{1,2}\s+)?[а-яё]+(?:\s+\d{4})?)(?=$|[\s,.;)])/gi;
+function parseGoal(rest, money, b){
+  let s = unThousand(rest), deadline = null;
+  for(const dm of s.matchAll(GOAL_DUE_RE)){
+    const d = futureDate(dm[1]);
+    if(d){ deadline = d; s = s.replace(dm[0], " "); break; }
+  }
+  let start = 0;
+  const sm = s.match(/(?:^|[\s,;(])(?:есть|накоплено|отложено|уже)\s*:?\s*([^,;)]+)/i);
+  if(sm){ const v = money(sm[1]); if(v){ start = v.rub; s = s.replace(sm[0], " "); } }
+  const tv = money(s);
+  const name = labelOf(s).replace(/[()]/g, "").trim() || "Цель";
+  const stems = name.toLowerCase().split(/[^a-zа-яё0-9]+/).filter(w => w.length >= 3).map(w => w.slice(0, Math.min(5, Math.max(3, w.length - 2))));
+  return {b, name, target: tv ? tv.rub : null, cur: tv?.cur, orig: tv?.orig, start, deadline, stems};
+}
+/* Проставить даты тратам и пополнениям и время изменения строке «Есть». Возвращает true, если что-то поменялось. */
+function syncMoney(n){
+  const now = Date.now(); let ch = false;
+  for(const b of n.blocks){
+    if(b.type !== "text") continue;
+    const t = b.text.trim(); let m;
+    if((m = t.match(BAL_RE))){ const v = m[2].trim(); if(b.bv !== v){ b.bv = v; b.at = now; ch = true; } continue; }
+    if(!EXP_RE.test(t) && !DEP_RE.test(t)) continue;
+    if(!b.at){ b.at = now; ch = true; }
+    const tm = t.match(ETOK_RE), tok = tm ? tm[1].toLowerCase() : "";
+    if(tok === (b.etok || "") && b.day) continue;
+    const d = tok ? pastDate(tok) : null;
+    b.day = iso(d || day0(new Date(b.at)));
+    if(tok) b.etok = tok; else delete b.etok;
+    ch = true;
+  }
+  return ch;
+}
+function shortDay(isoStr){
+  const k = dayDiff(isoStr);
+  return k === 0 ? "сегодня" : k === -1 ? "вчера" : fromIso(isoStr).toLocaleDateString("ru-RU", {day:"numeric", month:"short"});
+}
+
 function budgetOf(n){
   const today = new Date().getDate();
-  let balance = null, adults = 0, kids = 0, people = 0;
-  const incomes = [], pays = [], over = {};
+  let balance = null, balAt = 0, adults = 0, kids = 0, people = 0;
+  const incomes = [], pays = [], over = {}, spends = [], deps = [], goals = [], tags = {};
   // свой курс из строк «Курс: 92», «Курс €: 100»
   const myRate = {};
   for(const b of n.blocks){
@@ -1218,7 +1326,19 @@ function budgetOf(n){
     let m;
     if(b.type === "text"){
       if(t.match(RATE_RE)) continue;
-      if((m = t.match(BAL_RE))){ const v = money(m[2]); if(v) balance = v.rub; continue; }
+      if((m = t.match(BAL_RE))){ const v = money(m[2]); if(v){ balance = v.rub; balAt = b.at || 0; } continue; }
+      const em = t.match(EXP_RE), dpm = !em && t.match(DEP_RE);
+      if(em || dpm){
+        const body = (em || dpm)[1].replace(ETOK_RE, " ");
+        const mv = money(body);
+        if(mv){
+          const label = labelOf(body);
+          const it = {b, amount:mv.rub, cur:mv.cur, orig:mv.orig, label, day:b.day || iso(day0()), at:b.at || 0};
+          if(em){ it.cat = catOf(label); spends.push(it); } else deps.push(it);
+        }
+        continue;
+      }
+      if((m = t.match(GOAL_RE))){ goals.push(parseGoal(m[1], money, b)); continue; }
       if((m = t.match(PAY_RE))){
         // «Зарплата: 10-го 40 000», «Аванс 25 числа 30к», «Зарплата: 100 000»
         let rest = unThousand(m[2]);
@@ -1289,8 +1409,63 @@ function budgetOf(n){
   const nowPays = pays.filter(dueBeforePay);
   const laterPays = pays.filter(x => !x.done && !dueBeforePay(x));
   const dueNow = nowPays.reduce((s, x) => s + x.amount, 0);
-  const free = balance != null ? balance - dueNow : null;
-  const perDay = free != null && daysToPay ? free / daysToPay : null;
+  /* Траты и пополнения целей, записанные после обновления «Есть», уже ушли с баланса */
+  const todayIso = iso(day0());
+  const afterBal = x => balance != null && x.at >= balAt;
+  const spentSince = spends.filter(afterBal).reduce((s, x) => s + x.amount, 0);
+  const depSince = deps.filter(afterBal).reduce((s, x) => s + x.amount, 0);
+  const todaySub = spends.filter(x => afterBal(x) && x.day === todayIso).reduce((s, x) => s + x.amount, 0);
+  const free = balance != null ? balance - dueNow - spentSince - depSince : null;
+  // лимит на день считается от начала дня, чтобы траты сегодня не уменьшали его самого
+  const perDay = free != null && daysToPay ? (free + todaySub) / daysToPay : null;
+
+  /* Траты за месяц по категориям */
+  const curM = ym(), pd = new Date(); pd.setDate(1); pd.setMonth(pd.getMonth() - 1);
+  const prevM = pd.getFullYear() + "-" + String(pd.getMonth() + 1).padStart(2, "0");
+  const by = {food:0, transport:0, fun:0, other:0};
+  let spentMonth = 0, spentPrev = 0, spentToday = 0;
+  for(const x of spends){
+    const mk = x.day.slice(0, 7);
+    if(mk === curM){ by[x.cat] += x.amount; spentMonth += x.amount; }
+    else if(mk === prevM) spentPrev += x.amount;
+    if(x.day === todayIso) spentToday += x.amount;
+    tags[x.b.id] = `<span class="due" title="${CAT_NAME[x.cat]}">${shortDay(x.day)} · ${CAT_NAME[x.cat].toLowerCase()}</span>`;
+  }
+  const spent = spends.length ? {by, month:spentMonth, prev:spentPrev, today:spentToday, since:spentSince, count:spends.filter(x => x.day.slice(0, 7) === curM).length} : null;
+
+  /* Цели: сколько накоплено, сколько откладывать в месяц до срока */
+  const unmatched = [];
+  for(const d of deps){
+    const low = d.label.toLowerCase();
+    let g = goals.find(g => g.stems.some(s => low.includes(s)));
+    if(!g && goals.length === 1) g = goals[0];
+    if(g){ (g.deps = g.deps || []).push(d); tags[d.b.id] = `<span class="due paid">${shortDay(d.day)} · ${esc(g.name)}</span>`; }
+    else { unmatched.push(d); tags[d.b.id] = `<span class="due late">${goals.length ? "к какой цели?" : "нет цели"}</span>`; }
+  }
+  let needMonthly = 0;
+  for(const g of goals){
+    const ds = g.deps || [];
+    g.saved = g.start + ds.reduce((s, x) => s + x.amount, 0);
+    g.thisMonth = ds.filter(x => x.day.slice(0, 7) === curM).reduce((s, x) => s + x.amount, 0);
+    g.left = g.target != null ? Math.max(0, g.target - g.saved) : null;
+    g.pct = g.target ? Math.min(100, g.saved / g.target * 100) : null;
+    g.reached = g.target != null && g.saved >= g.target;
+    if(g.deadline && g.left){
+      const days = Math.round((g.deadline - day0()) / 864e5);
+      g.days = days;
+      if(days <= 0) g.late = true;
+      else { g.months = days / 30.44; g.perMonth = Math.ceil(g.left / Math.max(1, g.months) / 100) * 100; needMonthly += g.perMonth; }
+    }
+    tags[g.b.id] = g.target ? `<span class="due${g.reached ? " paid" : ""}">${g.reached ? "готово" : Math.floor(g.pct) + "%"}</span>` : `<span class="due late">нужна сумма</span>`;
+  }
+  // цели без срока: при плане «Отложить» прикидываем, когда накопится
+  const saveBudget = plan && plan.save ? plan.save : null;
+  const openGoals = goals.filter(g => !g.deadline && g.left);
+  if(saveBudget && openGoals.length){
+    const share = Math.max(0, saveBudget - needMonthly) / openGoals.length;
+    for(const g of openGoals) g.eta = share ? Math.ceil(g.left / share) : null;
+  }
+  const goalsInfo = goals.length ? {list:goals, needMonthly, saveBudget, thisMonth:deps.filter(x => x.day.slice(0, 7) === curM).reduce((s, x) => s + x.amount, 0), unmatched} : null;
   const dimNow = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
   const livingMonth = (food || 0) + (transport || 0) + (fun || 0);
   const livingUntilPay = livingMonth && daysToPay ? Math.round(livingMonth * daysToPay / dimNow / 100) * 100 : null;
@@ -1318,15 +1493,16 @@ function budgetOf(n){
     for(const p of periods){ if(p.left == null) break; p.carry = carry; p.total = carry + p.left; carry = p.total; }
   }
   const fx = usedCur.size || noRate ? {cur:[...usedCur], noRate, rate:Object.fromEntries([...usedCur].map(c => [c, myRate[c] || FX.rates?.[c]])), mine:myRate} : null;
-  return {fx, balance, pays, total, paid, unpaid, free, dueNow, laterPays, daysToPay, perDay, livingUntilPay, next: open[0] || null, nextIncome, plan, periods};
+  return {fx, balance, pays, total, paid, unpaid, free, dueNow, laterPays, daysToPay, perDay, livingUntilPay, next: open[0] || null, nextIncome, plan, periods,
+    spends, spent, todaySub, depSince, goals:goalsInfo, tags};
 }
 function dayWord(n){ const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? "день" : a >= 2 && a <= 4 && (b < 12 || b > 14) ? "дня" : "дней"; }
 function peopleWord(n){ const a = n % 10, b = n % 100; return a >= 2 && a <= 4 && (b < 12 || b > 14) ? "человека" : "человек"; }
 const pctOf = (v, inc) => inc ? Math.round(v / inc * 100) + "%" : "";
 function budgetPanel(n){
   const B = budgetOf(n);
-  const help = `<div class="bg-help">Пишите строками: <code>Есть: 85 000</code> <code>Зарплата: 10-го 40 000</code> <code>Аванс: 25-го 30 000</code> <code>Людей: 3</code>, платежи — <code>[.] Аренда 35 000 до 5</code>. Валюта: <code>Зарплата: 10-го 1 500 $</code>, <code>200 €</code>. Свои нормы: <code>Еда: 40 000</code> <code>Транспорт: 12%</code> <code>Развлечения: 5 000</code> <code>Копить: 15%</code>. Галочки платежей снимаются 1-го числа.</div>`;
-  if(B.balance == null && !B.pays.length && !B.plan) return `<div class="budget" id="budgetPanel">${help}</div>`;
+  const help = `<div class="bg-help">Пишите строками: <code>Есть: 85 000</code> <code>Зарплата: 10-го 40 000</code> <code>Аванс: 25-го 30 000</code> <code>Людей: 3</code>, платежи — <code>[.] Аренда 35 000 до 5</code>. Валюта: <code>Зарплата: 10-го 1 500 $</code>, <code>200 €</code>. Свои нормы: <code>Еда: 40 000</code> <code>Транспорт: 12%</code> <code>Развлечения: 5 000</code> <code>Копить: 15%</code>. Траты — <code>- 450 кофе</code>, <code>- 1 200 такси @вчера</code>. Цели — <code>Цель: Отпуск 120 000 к 01.06</code>, пополнение <code>+ 5 000 отпуск</code>. Галочки платежей снимаются 1-го числа.</div>`;
+  if(B.balance == null && !B.pays.length && !B.plan && !B.spends.length && !B.goals) return `<div class="budget" id="budgetPanel">${help}</div>`;
   const ni = B.nextIncome;
   const GEN = {"зарплата":"зарплаты","зп":"зп","аванс":"аванса","получка":"получки","доход":"дохода"};
   const payName = ni ? `${GEN[ni.name.toLowerCase()] || ni.name.toLowerCase()} ${ni.day}-го` : "зарплаты";
@@ -1335,7 +1511,8 @@ function budgetPanel(n){
     ? `<div><span class="bl">Свободно до ${ni ? payName : "зарплаты"}</span><span class="bv${B.free < 0 ? " neg" : ""}">${rub(B.free)}</span>${
         B.perDay != null ? `<span class="bs">≈ ${rub(Math.max(0, B.perDay))} в день · ${B.daysToPay} ${dayWord(B.daysToPay)}${ni && ni.amount ? `, потом придёт ${rub(ni.amount)}` : ""}</span>`
         : B.daysToPay === 0 ? `<span class="bs">Зарплата сегодня</span>` : ""}
-      ${B.dueNow ? `<span class="bs">Уже вычтено: платежи до зарплаты ${rub(B.dueNow)}</span>` : ""}
+      ${B.dueNow || B.spent?.since || B.depSince ? `<span class="bs">Уже вычтено: ${[B.dueNow ? `платежи до зарплаты ${rub(B.dueNow)}` : "", B.spent?.since ? `траты ${rub(B.spent.since)}` : "", B.depSince ? `на цели ${rub(B.depSince)}` : ""].filter(Boolean).join(", ")}</span>` : ""}
+      ${B.perDay != null && B.todaySub ? `<span class="bg-today${B.todaySub > B.perDay ? " neg" : ""}">Сегодня потрачено ${rub(B.todaySub)} — ${B.todaySub > B.perDay ? `больше дневной нормы на ${rub(B.todaySub - Math.max(0, B.perDay))}` : `можно ещё ${rub(B.perDay - B.todaySub)}`}</span>` : ""}
       ${laterSum ? `<span class="bs">Из ${payName} оплатить: ${B.laterPays.map(x => esc(x.label) + " " + rub(x.amount)).join(", ")}</span>` : ""}
       ${B.livingUntilPay != null && B.free != null && B.livingUntilPay > B.free ? `<span class="bs neg">На еду и транспорт до зарплаты по плану нужно ≈ ${rub(B.livingUntilPay)}</span>` : ""}</div>`
     : `<div><span class="bl">Свободно сейчас</span><span class="bs">Добавьте строку <b>Есть: сумма</b>, чтобы посчитать остаток</span></div>`;
@@ -1373,7 +1550,47 @@ function budgetPanel(n){
       <div><span class="bl">Оплачено</span><b>${rub(B.paid)}</b> <span class="nw">из ${rub(B.total)}</span></div>
     </div>
     <div class="bar" title="Оплачено ${pct}%"><i style="width:${pct}%"></i></div>` : ""}
-    ${fxHtml(B)}${nextTxt}${planHtml}${per}${help}</div>`;
+    ${fxHtml(B)}${nextTxt}${spentHtml(B)}${planHtml}${per}${goalsHtml(B)}${help}</div>`;
+}
+function spentHtml(B){
+  const S = B.spent; if(!S) return "";
+  const P = B.plan, now = new Date();
+  const norm = {food:P?.food, transport:P?.transport, fun:P?.fun};
+  const rows = CATS.map(c => c[0]).filter(k => S.by[k] || norm[k]).map(k => {
+    const v = S.by[k], lim = norm[k], over = lim && v > lim;
+    const note = lim ? (over ? `из ${rub(lim)} по плану · перерасход ${rub(v - lim)}` : `из ${rub(lim)} по плану · осталось ${rub(lim - v)}`) : "";
+    return `<tr><td>${CAT_NAME[k]}${note ? `<span class="pn${over ? " neg" : ""}">${note}</span>` : ""}</td><td>${rub(v)}</td><td class="${over ? "neg" : ""}">${lim ? Math.round(v / lim * 100) + "%" : ""}</td></tr>`;
+  }).join("");
+  const prevName = MONTH_IN[(now.getMonth() + 11) % 12];
+  return `<div class="plan"><span class="bl">Траты в ${MONTH_IN[now.getMonth()]}</span>
+    ${S.month || rows ? `<table>${rows}<tr class="inc"><td>Всего${S.count ? `<span class="pn">${S.count} ${S.count % 10 === 1 && S.count % 100 !== 11 ? "запись" : S.count % 10 >= 2 && S.count % 10 <= 4 && (S.count % 100 < 12 || S.count % 100 > 14) ? "записи" : "записей"}${S.today ? ` · сегодня ${rub(S.today)}` : ""}</span>` : ""}</td><td>${rub(S.month)}</td><td></td></tr></table>` : `<div class="bg-note">В этом месяце трат пока нет.</div>`}
+    ${S.prev ? `<div class="bg-note">В ${prevName}: ${rub(S.prev)}</div>` : ""}
+  </div>`;
+}
+function goalsHtml(B){
+  const G = B.goals; if(!G) return "";
+  const D = d => d.toLocaleDateString("ru-RU", {day:"numeric", month:"long", ...(d.getFullYear() !== new Date().getFullYear() ? {year:"numeric"} : {})}).replace(/\s*г\.$/, "");
+  const items = G.list.map(g => {
+    if(g.target == null) return `<div class="goal"><div class="g-top"><b>${esc(g.name)}</b><span>${rub(g.saved)}</span></div><span class="pn">Допишите сумму цели, например <code>Цель: ${esc(g.name)} 100 000</code></span></div>`;
+    const bits = [];
+    if(g.reached) bits.push("Цель достигнута 🎉");
+    else {
+      bits.push(`осталось ${rub(g.left)}`);
+      if(g.late) bits.push(`<span class="neg">срок ${D(g.deadline)} прошёл</span>`);
+      else if(g.deadline){ const mo = Math.max(1, Math.round(g.months)); bits.push(`к ${D(g.deadline)}${g.days < 45 ? ` · ${g.days} ${dayWord(g.days)}` : ` · ${mo} ${monthWord(mo)}`}`, `откладывать ≈ ${rub(g.perMonth)} в месяц`); }
+      else if(g.eta) bits.push(`при плане «Отложить» ≈ ${g.eta} ${monthWord(g.eta)}`);
+    }
+    if(g.thisMonth) bits.push(`в этом месяце +${rub(g.thisMonth)}`);
+    return `<div class="goal${g.reached ? " reached" : ""}"><div class="g-top"><b>${esc(g.name)}</b><span>${rub(g.saved)} из ${rub(g.target)}${g.cur ? ` (${fmtCur(g.orig, g.cur)})` : ""}</span></div><div class="bar" title="${Math.floor(g.pct)}%"><i style="width:${g.pct}%"></i></div><span class="pn">${bits.join(" · ")}</span></div>`;
+  }).join("");
+  let sum = "";
+  if(G.needMonthly && G.saveBudget != null){
+    const gap = G.needMonthly - G.saveBudget;
+    sum = `<div class="bg-note${gap > 0 ? " warn" : ""}">На цели со сроком нужно откладывать ${rub(G.needMonthly)} в месяц, по плану откладывается ${rub(G.saveBudget)}${gap > 0 ? ` — не хватает ${rub(gap)}. Увеличьте <code>Копить:</code> или сдвиньте срок.` : " — хватает."}</div>`;
+  } else if(G.needMonthly) sum = `<div class="bg-note">На цели со сроком нужно откладывать ${rub(G.needMonthly)} в месяц.</div>`;
+  if(G.thisMonth && G.saveBudget) sum += `<div class="bg-note">В этом месяце отложено ${rub(G.thisMonth)} из ${rub(G.saveBudget)} по плану.</div>`;
+  if(G.unmatched.length) sum += `<div class="bg-note warn">Не понял, к какой цели: ${G.unmatched.map(d => esc(d.b.text.trim())).join(", ")}. Допишите слово из названия цели.</div>`;
+  return `<div class="plan"><span class="bl">Цели</span>${items}${sum}</div>`;
 }
 function fxHtml(B){
   if(!B.fx) return "";
@@ -1402,7 +1619,7 @@ function budgetMonthReset(n){
   n.month = now; n.updated = Date.now(); changed();
   return true;
 }
-const BUDGET_TEMPLATE = ["Есть: 50 000", "Зарплата: 10-го 40 000", "Зарплата: 25-го 60 000", "Людей: 2", "[.] Аренда 30 000 до 5", "[.] Связь и интернет 1 200 до 15", "[.] Коммуналка 6 000 до 20"];
+const BUDGET_TEMPLATE = ["Есть: 50 000", "Зарплата: 10-го 40 000", "Зарплата: 25-го 60 000", "Людей: 2", "[.] Аренда 30 000 до 5", "[.] Связь и интернет 1 200 до 15", "[.] Коммуналка 6 000 до 20", "Цель: Подушка безопасности 100 000"];
 
 /* Строка «[.] слово» становится чекбоксом; «[x] слово» — отмеченным */
 const CHECK_RE = /^\[([.\sxх]?)\]\s/i;
