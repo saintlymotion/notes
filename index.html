@@ -850,7 +850,12 @@ function blockHTML(b, total, due){
     <textarea rows="1" placeholder="${ph}">${esc(b.text)}</textarea>${dueTag(due)}</div>`;
 }
 function autosize(t){ t.style.height = "auto"; t.style.height = t.scrollHeight + "px"; }
-function render(){ renderFolders(); renderList(); renderEditor(); $("#app").classList.toggle("reading", reading && !!note()); }
+function render(){
+  // сначала показываем нужную колонку, иначе на телефоне высота строк считается у скрытого редактора
+  $("#app").classList.toggle("reading", reading && !!note());
+  renderFolders(); renderList(); renderEditor();
+  requestAnimationFrame(() => document.querySelectorAll("#blocks textarea").forEach(autosize));
+}
 
 function touch(){ const n = note(); if(n) n.updated = Date.now(); changed(); }
 function refreshSide(){ renderList(); renderFolders(); }
@@ -935,26 +940,40 @@ function budgetOf(n){
   const payDays = incomes.filter(x => x.day).map(x => x.day);
   const daysToPay = payDays.length ? Math.min(...payDays.map(daysUntil)) : null;
   const nextIncome = payDays.length ? incomes.filter(x => x.day).sort((a, b) => daysUntil(a.day) - daysUntil(b.day))[0] : null;
-  const free = balance != null ? balance - unpaid : null;
-  const perDay = free != null && daysToPay ? free / daysToPay : null;
   const open = pays.filter(x => !x.done).sort((a, b) => (b.overdue - a.overdue) || ((a.left ?? 99) - (b.left ?? 99)));
 
-  /* План на месяц */
+  /* План на месяц: сначала необходимое, потом накопления, потом развлечения из того, что осталось */
   const income = incomes.reduce((s, x) => s + (x.amount || 0), 0);
   const heads = people || (adults + kids) || 0;
   const pick = (key, auto) => over[key] ? (over[key].sum != null ? over[key].sum : income * over[key].pct) : auto;
   const food = heads ? pick("food", Math.round(NORM.foodOne * Math.pow(heads, NORM.foodPow) / 100) * 100) : (over.food ? pick("food", 0) : null);
   const transport = income ? pick("transport", Math.round(income * NORM.transportPct / 100) * 100) : (over.transport?.sum ?? null);
-  const save = income ? pick("save", Math.round(income * NORM.savePct / 100) * 100) : (over.save?.sum ?? null);
-  let fun = null, rest = null;
-  if(income){
-    const base = total + (food || 0) + (transport || 0) + (save || 0);
-    const funAuto = Math.max(0, Math.min(Math.round(income * NORM.funPct / 100) * 100, income - base));
-    fun = pick("fun", funAuto);
-    rest = income - base - fun;
-  } else if(over.fun?.sum != null) fun = over.fun.sum;
   const needs = total + (food || 0) + (transport || 0);
-  const plan = income || heads ? {income, heads, food, transport, fun, save, rest, needs, needsPct: income ? needs / income : null, over} : null;
+  let save = null, fun = null, rest = null, saveCut = false;
+  if(income){
+    const afterNeeds = income - needs;
+    const saveTarget = pick("save", Math.round(income * NORM.savePct / 100) * 100);
+    save = over.save ? saveTarget : Math.max(0, Math.min(saveTarget, afterNeeds));
+    saveCut = !over.save && save < saveTarget;
+    fun = over.fun ? pick("fun", 0) : Math.max(0, Math.min(Math.round(income * NORM.funPct / 100) * 100, afterNeeds - save));
+    rest = afterNeeds - save - fun;
+  } else {
+    if(over.fun?.sum != null) fun = over.fun.sum;
+    if(over.save?.sum != null) save = over.save.sum;
+  }
+  const plan = income || heads ? {income, heads, food, transport, fun, save, saveCut, rest, needs, needsPct: income ? needs / income : null, over} : null;
+
+  /* Свободно до ближайшей зарплаты: вычитаем только платежи, которые наступают раньше неё
+     (и просроченные, и без даты). Платёж в день зарплаты или позже оплачивается из неё. */
+  const dueBeforePay = x => !x.done && (x.overdue || x.left == null || daysToPay == null || x.left < daysToPay);
+  const nowPays = pays.filter(dueBeforePay);
+  const laterPays = pays.filter(x => !x.done && !dueBeforePay(x));
+  const dueNow = nowPays.reduce((s, x) => s + x.amount, 0);
+  const free = balance != null ? balance - dueNow : null;
+  const perDay = free != null && daysToPay ? free / daysToPay : null;
+  const dimNow = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
+  const livingMonth = (food || 0) + (transport || 0) + (fun || 0);
+  const livingUntilPay = livingMonth && daysToPay ? Math.round(livingMonth * daysToPay / dimNow / 100) * 100 : null;
 
   /* По зарплатам: какие платежи и сколько на жизнь приходится на каждый период */
   let periods = [];
@@ -966,13 +985,19 @@ function budgetOf(n){
       const from = x.day, to = withDays[(i + 1) % withDays.length].day;
       const len = to > from ? to - from : dim - from + to;
       const inP = d => to > from ? d >= from && d < to : d >= from || d < to;
-      const ps = pays.filter(p => p.due != null && inP(p.due));
+      // период, начинающийся в этом месяце: платежи с числом не раньше начала приходятся на этот месяц,
+      // и уже оплаченные из них не считаются; остальные — уже следующий месяц, их нужно будет платить снова
+      const thisMonth = d => from >= today && d >= from;
+      const ps = pays.filter(p => p.due != null && inP(p.due) && !(p.done && thisMonth(p.due)));
       const sum = ps.reduce((s, p) => s + p.amount, 0);
       const life = Math.round(living * len / dim);
-      return {x, from, to, len, sum, count: ps.length, life, left: x.amount != null ? x.amount - sum - life : null};
-    });
+      return {x, from, to, len, sum, ps, count: ps.length, life, soon: daysUntil(from), left: x.amount != null ? x.amount - sum - life : null};
+    }).sort((a, b) => a.soon - b.soon);
+    // остаток переходит в следующий период
+    let carry = 0;
+    for(const p of periods){ if(p.left == null) break; p.carry = carry; p.total = carry + p.left; carry = p.total; }
   }
-  return {balance, pays, total, paid, unpaid, free, daysToPay, perDay, next: open[0] || null, nextIncome, plan, periods};
+  return {balance, pays, total, paid, unpaid, free, dueNow, laterPays, daysToPay, perDay, livingUntilPay, next: open[0] || null, nextIncome, plan, periods};
 }
 function dayWord(n){ const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? "день" : a >= 2 && a <= 4 && (b < 12 || b > 14) ? "дня" : "дней"; }
 function peopleWord(n){ const a = n % 10, b = n % 100; return a >= 2 && a <= 4 && (b < 12 || b > 14) ? "человека" : "человек"; }
@@ -981,10 +1006,17 @@ function budgetPanel(n){
   const B = budgetOf(n);
   const help = `<div class="bg-help">Пишите строками: <code>Есть: 85 000</code> <code>Зарплата: 10-го 40 000</code> <code>Аванс: 25-го 30 000</code> <code>Людей: 3</code>, платежи — <code>[.] Аренда 35 000 до 5</code>. Свои нормы: <code>Еда: 40 000</code> <code>Транспорт: 12%</code> <code>Развлечения: 5 000</code> <code>Копить: 15%</code>. Галочки платежей снимаются 1-го числа.</div>`;
   if(B.balance == null && !B.pays.length && !B.plan) return `<div class="budget" id="budgetPanel">${help}</div>`;
+  const ni = B.nextIncome;
+  const GEN = {"зарплата":"зарплаты","зп":"зп","аванс":"аванса","получка":"получки","доход":"дохода"};
+  const payName = ni ? `${GEN[ni.name.toLowerCase()] || ni.name.toLowerCase()} ${ni.day}-го` : "зарплаты";
+  const laterSum = B.laterPays.reduce((s, x) => s + x.amount, 0);
   const main = B.free != null
-    ? `<div><span class="bl">Свободно сейчас</span><span class="bv${B.free < 0 ? " neg" : ""}">${rub(B.free)}</span>${
-        B.perDay != null ? `<span class="bs">≈ ${rub(Math.max(0, B.perDay))} в день · ${B.daysToPay} ${dayWord(B.daysToPay)} до зарплаты${B.nextIncome && B.nextIncome.amount ? ` (${rub(B.nextIncome.amount)})` : ""}</span>`
-        : B.daysToPay === 0 ? `<span class="bs">Зарплата сегодня</span>` : ""}</div>`
+    ? `<div><span class="bl">Свободно до ${ni ? payName : "зарплаты"}</span><span class="bv${B.free < 0 ? " neg" : ""}">${rub(B.free)}</span>${
+        B.perDay != null ? `<span class="bs">≈ ${rub(Math.max(0, B.perDay))} в день · ${B.daysToPay} ${dayWord(B.daysToPay)}${ni && ni.amount ? `, потом придёт ${rub(ni.amount)}` : ""}</span>`
+        : B.daysToPay === 0 ? `<span class="bs">Зарплата сегодня</span>` : ""}
+      ${B.dueNow ? `<span class="bs">Уже вычтено: платежи до зарплаты ${rub(B.dueNow)}</span>` : ""}
+      ${laterSum ? `<span class="bs">Из ${payName} оплатить: ${B.laterPays.map(x => esc(x.label) + " " + rub(x.amount)).join(", ")}</span>` : ""}
+      ${B.livingUntilPay != null && B.free != null && B.livingUntilPay > B.free ? `<span class="bs neg">На еду и транспорт до зарплаты по плану нужно ≈ ${rub(B.livingUntilPay)}</span>` : ""}</div>`
     : `<div><span class="bl">Свободно сейчас</span><span class="bs">Добавьте строку <b>Есть: сумма</b>, чтобы посчитать остаток</span></div>`;
   const pct = B.total ? Math.round(B.paid / B.total * 100) : 0;
   const nx = B.next;
@@ -1003,8 +1035,8 @@ function budgetPanel(n){
         ${row("Еда", P.food, P.over.food ? mine("food") : P.heads ? `≈ ${rub(P.food / P.heads)} на человека` : "")}
         ${row("Транспорт", P.transport, mine("transport"))}
         ${row("Развлечения", P.fun, P.over.fun ? mine("fun") : P.heads && P.fun ? `≈ ${rub(P.fun / P.heads)} на человека` : "")}
-        ${row("Отложить", P.save, mine("save") || "правило 20%")}
-        ${P.rest != null ? `<tr class="tot${P.rest < 0 ? " neg" : ""}"><td>${P.rest < 0 ? "Не хватает" : "Остаётся на прочее"}</td><td>${rub(Math.abs(P.rest))}</td><td>${pctOf(Math.abs(P.rest), P.income)}</td></tr>` : ""}
+        ${row("Отложить", P.save, mine("save") || (P.saveCut ? "сколько остаётся, цель 20%" : "правило 20%"))}
+        ${P.rest != null ? `<tr class="tot${P.rest < 0 ? " neg" : ""}"><td>${P.rest < 0 ? "Не хватает на необходимое" : "Остаётся на прочее"}</td><td>${rub(Math.abs(P.rest))}</td><td>${pctOf(Math.abs(P.rest), P.income)}</td></tr>` : ""}
       </table>
       ${P.needsPct != null ? `<div class="bg-note${P.needsPct > 0.5 ? " warn" : ""}">На необходимое (платежи, еда, транспорт) уходит ${Math.round(P.needsPct * 100)}% дохода${P.needsPct > 0.5 ? ` — больше рекомендуемых 50%` : `, это в пределах рекомендуемых 50%`}.</div>`
         : !P.income ? `<div class="bg-note">Добавьте сумму зарплаты, например <code>Зарплата: 10-го 40 000</code>, чтобы посчитать транспорт, развлечения и накопления.</div>` : ""}
@@ -1012,7 +1044,7 @@ function budgetPanel(n){
     </div>`;
   }
   const per = B.periods.length ? `<div class="plan"><span class="bl">По зарплатам</span><table>${B.periods.map(p =>
-      `<tr><td>${esc(p.x.name)} ${p.from}-го${p.x.amount ? `<span class="pn">${rub(p.x.amount)} на ${p.len} ${dayWord(p.len)}, до ${p.to}-го</span>` : ""}</td><td>${p.count ? `платежи ${rub(p.sum)}` : "без платежей"}<span class="pn">на жизнь ≈ ${rub(p.life)}</span></td><td>${p.left != null ? `<b class="${p.left < 0 ? "neg" : ""}">${p.left < 0 ? "−" : ""}${rub(Math.abs(p.left))}</b><span class="pn">${p.left < 0 ? "не хватит" : "останется"}</span>` : ""}</td></tr>`).join("")}</table></div>` : "";
+      `<tr><td>${esc(p.x.name)} ${p.from}-го${p.soon === 0 ? " · сегодня" : ` · через ${p.soon} ${dayWord(p.soon)}`}${p.x.amount ? `<span class="pn">${rub(p.x.amount)} на ${p.len} ${dayWord(p.len)}, до ${p.to}-го</span>` : ""}</td><td>${p.count ? `платежи ${rub(p.sum)}<span class="pn">${p.ps.map(q => esc(q.label) + " " + q.due + "-го").join(", ")}</span>` : "без платежей"}<span class="pn">на жизнь ≈ ${rub(p.life)}</span></td><td>${p.total != null ? `<b class="${p.total < 0 ? "neg" : ""}">${p.total < 0 ? "−" : ""}${rub(Math.abs(p.total))}</b><span class="pn">${p.total < 0 ? "не хватит" : "останется"}${p.carry ? `, с учётом ${rub(p.carry)} с прошлой` : ""}</span>` : ""}</td></tr>`).join("")}</table></div>` : "";
   return `<div class="budget" id="budgetPanel">${main}
     ${B.pays.length ? `<div class="bg-grid">
       ${B.balance != null ? `<div><span class="bl">Есть</span><b>${rub(B.balance)}</b></div>` : ""}
