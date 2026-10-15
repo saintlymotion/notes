@@ -1,6 +1,6 @@
 // Service worker: сохраняет приложение на устройстве, чтобы оно открывалось без интернета.
 // При изменении файлов увеличьте номер версии — тогда устройства подтянут обновление.
-const VERSION = "notes-v7";
+const VERSION = "notes-v8";
 const SHELL = [
   "./", "./index.html", "./config.js", "./manifest.webmanifest",
   "./icons/icon-192.png", "./icons/icon-512.png", "./icons/maskable-512.png", "./icons/apple-touch-icon.png",

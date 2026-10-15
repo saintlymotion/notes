@@ -103,7 +103,7 @@ hr{border:0;border-top:1px solid var(--line);margin:4px 0}
     padding-left:max(12px,env(safe-area-inset-left,0px));padding-right:max(12px,env(safe-area-inset-right,0px))}
   .folders{border:0;flex-direction:row;overflow-x:auto;padding:12px 0;gap:6px;align-items:center}
   .folders .label{display:none}
-  .foot{margin:0;padding:0;flex:none;order:99}
+  .foot{margin:0;padding:0;flex:none;order:99;flex-direction:row;align-items:center}
   .sync span:last-child{display:none}
   .folder{width:auto;flex:none;border:1px solid var(--line);border-radius:999px;padding:6px 12px}
   .folder.on{border-color:var(--accent)}
@@ -178,6 +178,19 @@ mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding
 .bar i{display:block;height:100%;background:var(--ok);border-radius:3px}
 .bg-next{font-size:13px}
 .bg-next.late{color:var(--red)}
+.plan{display:flex;flex-direction:column;gap:6px;border-top:1px solid var(--line);padding-top:12px}
+.plan table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
+.plan td{padding:5px 0;vertical-align:top;border-bottom:1px solid var(--line)}
+.plan tr:last-child td{border-bottom:0}
+.plan td:nth-child(2){text-align:right;white-space:nowrap;padding-left:10px}
+.plan td:nth-child(3){text-align:right;color:var(--muted);width:56px;white-space:nowrap;padding-left:8px}
+.plan .pn{display:block;font-size:12px;color:var(--muted);white-space:normal}
+.plan tr.inc td{font-weight:600}
+.plan tr.tot td{font-weight:600;color:var(--ok)}
+.plan tr.tot.neg td, .plan .neg{color:var(--red)}
+.bg-note{font-size:13px}
+.bg-note.warn{color:var(--red)}
+.bg-note code{font-family:inherit;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:0 4px;white-space:nowrap}
 .bg-help{font-size:12px;color:var(--muted);line-height:1.5}
 .bg-help code{font-family:inherit;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:0 4px;white-space:nowrap}
 .due{font-size:12px;color:var(--muted);white-space:nowrap;padding-top:4px;flex:none;font-variant-numeric:tabular-nums}
@@ -857,6 +870,14 @@ function parseMoney(str){
 const DUE_RE = /(?:(?:^|[\s,;(—–-])до\s*|@\s*)(\d{1,2})(?:\s*-?\s*(?:го|е|ого))?(?:\s*числа)?|(\d{1,2})\s*-?\s*(?:го|е)?\s+числа/i;
 const BAL_RE = /^(есть|баланс|на руках|на карте|остаток)\s*:?\s*(.*)$/i;
 const PAY_RE = /^(зарплата|зп|аванс|получка|доход)\s*:?\s*(.*)$/i;
+const PEOPLE_RE = /^(людей|нас|семья|человек|взрослых|детей)\s*:?\s*(\d{1,2})/i;
+const NEED_RE = /^(еда|продукты|транспорт|проезд|развлечения|досуг|копить|накопления|откладывать)\s*:?\s*(.*)$/i;
+const NEED_KEY = {"еда":"food","продукты":"food","транспорт":"transport","проезд":"transport","развлечения":"fun","досуг":"fun","копить":"save","накопления":"save","откладывать":"save"};
+/* Нормы по умолчанию (меняются строками «Еда: 30 000», «Транспорт: 12%», «Копить: 10 000»):
+   еда — 19 000 ₽ на одного, в семье на каждого меньше (≈ 19 000 × людей^0,65; Т—Ж: 1 чел. 19 тыс., 3 чел. по 13 тыс., 5 чел. по 10,5 тыс.);
+   транспорт — 10% дохода, развлечения — до 7% дохода, накопления — 20% дохода (правило 50/30/20). */
+const NORM = {foodOne:19000, foodPow:0.65, transportPct:0.10, funPct:0.07, savePct:0.20};
+const unThousand = t => t.replace(/(\d)[\s ](?=\d{3}(?!\d))/g, "$1");
 function daysUntil(day){
   const now = new Date(), today = now.getDate();
   const dim = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
@@ -867,55 +888,139 @@ function daysUntil(day){
 }
 function budgetOf(n){
   const today = new Date().getDate();
-  let balance = null; const payDays = []; const pays = [];
+  let balance = null, adults = 0, kids = 0, people = 0;
+  const incomes = [], pays = [], over = {};
   for(const b of n.blocks){
     if(b.type === "image") continue;
     const t = b.text.trim();
     let m;
-    if(b.type === "text" && (m = t.match(BAL_RE))){ const v = parseMoney(m[2]); if(v != null) balance = v; continue; }
-    if(b.type === "text" && (m = t.match(PAY_RE))){ const d = m[2].match(/(\d{1,2})/); if(d && +d[1] >= 1 && +d[1] <= 31) payDays.push(+d[1]); continue; }
+    if(b.type === "text"){
+      if((m = t.match(BAL_RE))){ const v = parseMoney(m[2]); if(v != null) balance = v; continue; }
+      if((m = t.match(PAY_RE))){
+        // «Зарплата: 10-го 40 000», «Аванс 25 числа 30к», «Зарплата: 100 000»
+        let rest = unThousand(m[2]);
+        const dm = rest.match(/(?:^|[^\d])(\d{1,2})(?!\d)(?:\s*-?\s*(?:го|е|ого))?(?:\s*числа)?/i);
+        let day = null;
+        if(dm && +dm[1] >= 1 && +dm[1] <= 31){ day = +dm[1]; rest = rest.replace(dm[0], " "); }
+        const amount = parseMoney(rest);
+        incomes.push({day, amount: amount != null && amount >= 100 ? amount : null, name:m[1][0].toUpperCase() + m[1].slice(1).toLowerCase()});
+        continue;
+      }
+      if((m = t.match(PEOPLE_RE))){
+        const k = m[1].toLowerCase(), v = +m[2];
+        if(k === "взрослых") adults = v; else if(k === "детей") kids = v; else people = v;
+        continue;
+      }
+      if((m = t.match(NEED_RE))){
+        const key = NEED_KEY[m[1].toLowerCase()], pm = m[2].match(/(\d+(?:[.,]\d+)?)\s*%/);
+        if(pm) over[key] = {pct: parseFloat(pm[1].replace(",", ".")) / 100};
+        else { const v = parseMoney(m[2]); if(v != null) over[key] = {sum: v}; }
+        continue;
+      }
+      continue;
+    }
     if(b.type !== "check") continue;
     const dm = t.match(DUE_RE);
     const due = dm ? +(dm[1] || dm[2]) : null;
     const rest = dm ? t.replace(dm[0], " ") : t;
     const amount = parseMoney(rest);
     if(amount == null) continue;
-    const label = rest.replace(/(\d)[\s\u00a0](?=\d{3}(?!\d))/g, "$1").replace(/\d+(?:[.,]\d+)?\s*(тыс|к|k|₽|р\.?|руб\.?)?(?![a-zа-яё])/i, "").replace(/[—–\-:,.]+\s*$/, "").replace(/\s+/g, " ").trim() || "Платёж";
+    const label = unThousand(rest).replace(/\d+(?:[.,]\d+)?\s*(тыс|к|k|₽|р\.?|руб\.?)?(?![a-zа-яё])/i, "").replace(/[—–\-:,.]+\s*$/, "").replace(/\s+/g, " ").trim() || "Платёж";
     const overdue = !b.done && due != null && due < today;
     pays.push({b, label, amount, due, done:b.done, overdue, left: due != null && due >= today ? due - today : null});
   }
   const total = pays.reduce((s, x) => s + x.amount, 0);
   const paid = pays.filter(x => x.done).reduce((s, x) => s + x.amount, 0);
   const unpaid = total - paid;
+  const payDays = incomes.filter(x => x.day).map(x => x.day);
   const daysToPay = payDays.length ? Math.min(...payDays.map(daysUntil)) : null;
+  const nextIncome = payDays.length ? incomes.filter(x => x.day).sort((a, b) => daysUntil(a.day) - daysUntil(b.day))[0] : null;
   const free = balance != null ? balance - unpaid : null;
   const perDay = free != null && daysToPay ? free / daysToPay : null;
   const open = pays.filter(x => !x.done).sort((a, b) => (b.overdue - a.overdue) || ((a.left ?? 99) - (b.left ?? 99)));
-  return {balance, pays, total, paid, unpaid, free, daysToPay, perDay, next: open[0] || null};
+
+  /* План на месяц */
+  const income = incomes.reduce((s, x) => s + (x.amount || 0), 0);
+  const heads = people || (adults + kids) || 0;
+  const pick = (key, auto) => over[key] ? (over[key].sum != null ? over[key].sum : income * over[key].pct) : auto;
+  const food = heads ? pick("food", Math.round(NORM.foodOne * Math.pow(heads, NORM.foodPow) / 100) * 100) : (over.food ? pick("food", 0) : null);
+  const transport = income ? pick("transport", Math.round(income * NORM.transportPct / 100) * 100) : (over.transport?.sum ?? null);
+  const save = income ? pick("save", Math.round(income * NORM.savePct / 100) * 100) : (over.save?.sum ?? null);
+  let fun = null, rest = null;
+  if(income){
+    const base = total + (food || 0) + (transport || 0) + (save || 0);
+    const funAuto = Math.max(0, Math.min(Math.round(income * NORM.funPct / 100) * 100, income - base));
+    fun = pick("fun", funAuto);
+    rest = income - base - fun;
+  } else if(over.fun?.sum != null) fun = over.fun.sum;
+  const needs = total + (food || 0) + (transport || 0);
+  const plan = income || heads ? {income, heads, food, transport, fun, save, rest, needs, needsPct: income ? needs / income : null, over} : null;
+
+  /* По зарплатам: какие платежи и сколько на жизнь приходится на каждый период */
+  let periods = [];
+  const withDays = incomes.filter(x => x.day).sort((a, b) => a.day - b.day);
+  if(withDays.length >= 2){
+    const now = new Date(), dim = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+    const living = (food || 0) + (transport || 0) + (fun || 0);
+    periods = withDays.map((x, i) => {
+      const from = x.day, to = withDays[(i + 1) % withDays.length].day;
+      const len = to > from ? to - from : dim - from + to;
+      const inP = d => to > from ? d >= from && d < to : d >= from || d < to;
+      const ps = pays.filter(p => p.due != null && inP(p.due));
+      const sum = ps.reduce((s, p) => s + p.amount, 0);
+      const life = Math.round(living * len / dim);
+      return {x, from, to, len, sum, count: ps.length, life, left: x.amount != null ? x.amount - sum - life : null};
+    });
+  }
+  return {balance, pays, total, paid, unpaid, free, daysToPay, perDay, next: open[0] || null, nextIncome, plan, periods};
 }
 function dayWord(n){ const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? "день" : a >= 2 && a <= 4 && (b < 12 || b > 14) ? "дня" : "дней"; }
+function peopleWord(n){ const a = n % 10, b = n % 100; return a >= 2 && a <= 4 && (b < 12 || b > 14) ? "человека" : "человек"; }
+const pctOf = (v, inc) => inc ? Math.round(v / inc * 100) + "%" : "";
 function budgetPanel(n){
   const B = budgetOf(n);
-  const help = `<div class="bg-help">Пишите строками: <code>Есть: 85 000</code> <code>Зарплата: 25</code>, платежи — <code>[.] Аренда 35 000 до 5</code>. Отметили галочку — платёж оплачен. Первого числа галочки сбрасываются сами.</div>`;
-  if(B.balance == null && !B.pays.length) return `<div class="budget" id="budgetPanel">${help}</div>`;
+  const help = `<div class="bg-help">Пишите строками: <code>Есть: 85 000</code> <code>Зарплата: 10-го 40 000</code> <code>Аванс: 25-го 30 000</code> <code>Людей: 3</code>, платежи — <code>[.] Аренда 35 000 до 5</code>. Свои нормы: <code>Еда: 40 000</code> <code>Транспорт: 12%</code> <code>Развлечения: 5 000</code> <code>Копить: 15%</code>. Галочки платежей снимаются 1-го числа.</div>`;
+  if(B.balance == null && !B.pays.length && !B.plan) return `<div class="budget" id="budgetPanel">${help}</div>`;
   const main = B.free != null
-    ? `<div><span class="bl">Свободно</span><span class="bv${B.free < 0 ? " neg" : ""}">${rub(B.free)}</span>${
-        B.perDay != null ? `<span class="bs">≈ ${rub(Math.max(0, B.perDay))} в день · ${B.daysToPay} ${dayWord(B.daysToPay)} до зарплаты</span>`
+    ? `<div><span class="bl">Свободно сейчас</span><span class="bv${B.free < 0 ? " neg" : ""}">${rub(B.free)}</span>${
+        B.perDay != null ? `<span class="bs">≈ ${rub(Math.max(0, B.perDay))} в день · ${B.daysToPay} ${dayWord(B.daysToPay)} до зарплаты${B.nextIncome && B.nextIncome.amount ? ` (${rub(B.nextIncome.amount)})` : ""}</span>`
         : B.daysToPay === 0 ? `<span class="bs">Зарплата сегодня</span>` : ""}</div>`
-    : `<div><span class="bl">Свободно</span><span class="bs">Добавьте строку <b>Есть: сумма</b>, чтобы посчитать остаток</span></div>`;
+    : `<div><span class="bl">Свободно сейчас</span><span class="bs">Добавьте строку <b>Есть: сумма</b>, чтобы посчитать остаток</span></div>`;
   const pct = B.total ? Math.round(B.paid / B.total * 100) : 0;
   const nx = B.next;
   const nextTxt = nx ? `<div class="bg-next${nx.overdue ? " late" : ""}">${nx.overdue ? "Просрочен" : "Ближайший"}: ${esc(nx.label)} — ${rub(nx.amount)}${
       nx.overdue ? `, срок был ${nx.due}-го` : nx.left === 0 ? ", сегодня" : nx.left != null ? `, через ${nx.left} ${dayWord(nx.left)}` : ""}</div>`
     : B.pays.length ? `<div class="bg-next">Все обязательные платежи этого месяца оплачены</div>` : "";
+  const P = B.plan;
+  let planHtml = "";
+  if(P){
+    const row = (label, v, note, cls = "") => v == null ? "" : `<tr class="${cls}"><td>${label}${note ? `<span class="pn">${note}</span>` : ""}</td><td>${rub(v)}</td><td>${pctOf(v, P.income)}</td></tr>`;
+    const mine = k => P.over[k] ? "ваша норма" : "";
+    planHtml = `<div class="plan"><span class="bl">План на месяц${P.heads ? ` · ${P.heads} ${peopleWord(P.heads)}` : ""}</span>
+      <table>
+        ${P.income ? `<tr class="inc"><td>Доход</td><td>${rub(P.income)}</td><td></td></tr>` : ""}
+        ${B.total ? row("Обязательные платежи", B.total) : ""}
+        ${row("Еда", P.food, P.over.food ? mine("food") : P.heads ? `≈ ${rub(P.food / P.heads)} на человека` : "")}
+        ${row("Транспорт", P.transport, mine("transport"))}
+        ${row("Развлечения", P.fun, P.over.fun ? mine("fun") : P.heads && P.fun ? `≈ ${rub(P.fun / P.heads)} на человека` : "")}
+        ${row("Отложить", P.save, mine("save") || "правило 20%")}
+        ${P.rest != null ? `<tr class="tot${P.rest < 0 ? " neg" : ""}"><td>${P.rest < 0 ? "Не хватает" : "Остаётся на прочее"}</td><td>${rub(Math.abs(P.rest))}</td><td>${pctOf(Math.abs(P.rest), P.income)}</td></tr>` : ""}
+      </table>
+      ${P.needsPct != null ? `<div class="bg-note${P.needsPct > 0.5 ? " warn" : ""}">На необходимое (платежи, еда, транспорт) уходит ${Math.round(P.needsPct * 100)}% дохода${P.needsPct > 0.5 ? ` — больше рекомендуемых 50%` : `, это в пределах рекомендуемых 50%`}.</div>`
+        : !P.income ? `<div class="bg-note">Добавьте сумму зарплаты, например <code>Зарплата: 10-го 40 000</code>, чтобы посчитать транспорт, развлечения и накопления.</div>` : ""}
+      ${!P.heads && P.income ? `<div class="bg-note">Добавьте строку <code>Людей: 2</code>, чтобы посчитать еду.</div>` : ""}
+    </div>`;
+  }
+  const per = B.periods.length ? `<div class="plan"><span class="bl">По зарплатам</span><table>${B.periods.map(p =>
+      `<tr><td>${esc(p.x.name)} ${p.from}-го${p.x.amount ? `<span class="pn">${rub(p.x.amount)} на ${p.len} ${dayWord(p.len)}, до ${p.to}-го</span>` : ""}</td><td>${p.count ? `платежи ${rub(p.sum)}` : "без платежей"}<span class="pn">на жизнь ≈ ${rub(p.life)}</span></td><td>${p.left != null ? `<b class="${p.left < 0 ? "neg" : ""}">${p.left < 0 ? "−" : ""}${rub(Math.abs(p.left))}</b><span class="pn">${p.left < 0 ? "не хватит" : "останется"}</span>` : ""}</td></tr>`).join("")}</table></div>` : "";
   return `<div class="budget" id="budgetPanel">${main}
-    <div class="bg-grid">
+    ${B.pays.length ? `<div class="bg-grid">
       ${B.balance != null ? `<div><span class="bl">Есть</span><b>${rub(B.balance)}</b></div>` : ""}
       <div><span class="bl">Ещё заплатить</span><b>${rub(B.unpaid)}</b></div>
       <div><span class="bl">Оплачено</span><b>${rub(B.paid)}</b> <span class="nw">из ${rub(B.total)}</span></div>
     </div>
-    ${B.total ? `<div class="bar" title="Оплачено ${pct}%"><i style="width:${pct}%"></i></div>` : ""}
-    ${nextTxt}${help}</div>`;
+    <div class="bar" title="Оплачено ${pct}%"><i style="width:${pct}%"></i></div>` : ""}
+    ${nextTxt}${planHtml}${per}${help}</div>`;
 }
 function dueTag(info){
   if(!info) return "";
@@ -934,7 +1039,7 @@ function budgetMonthReset(n){
   n.month = now; n.updated = Date.now(); changed();
   return true;
 }
-const BUDGET_TEMPLATE = ["Есть: 50 000", "Зарплата: 25", "[.] Аренда 30 000 до 5", "[.] Связь и интернет 1 200 до 15", "[.] Коммуналка 6 000 до 20"];
+const BUDGET_TEMPLATE = ["Есть: 50 000", "Зарплата: 10-го 40 000", "Зарплата: 25-го 60 000", "Людей: 2", "[.] Аренда 30 000 до 5", "[.] Связь и интернет 1 200 до 15", "[.] Коммуналка 6 000 до 20"];
 
 /* Строка «[.] слово» становится чекбоксом; «[x] слово» — отмеченным */
 const CHECK_RE = /^\[([.\sxх]?)\]\s/i;
