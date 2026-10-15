@@ -178,6 +178,15 @@ mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding
 .note .line .lbox{width:11px;height:11px;border:1.5px solid var(--muted);border-radius:3px;flex:none;align-self:center}
 .theme-btn .ti{width:12px;display:grid;place-items:center;font-size:13px;margin-left:-2px}
 
+/* Привычки */
+.htag{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);white-space:nowrap;padding-top:4px;flex:none}
+.htag .fire{color:var(--yellow);font-weight:600;font-variant-numeric:tabular-nums}
+.hdots{display:flex;gap:3px}
+.hdots i{width:7px;height:7px;border-radius:50%;border:1.5px solid var(--done)}
+.hdots i.y{background:var(--accent);border-color:var(--accent)}
+.hdots i.off{border:0;background:var(--line);width:5px;height:5px;margin:1px}
+.hdots i.t{box-shadow:0 0 0 1.5px var(--panel),0 0 0 3px var(--accent-soft)}
+
 /* Маскоты: Клубничка и Малинка */
 .mascot{display:flex;align-items:center;gap:8px;padding:4px 8px;border-radius:var(--r);position:relative;text-align:left;width:100%}
 .mascot:hover{background:var(--accent-soft)}
@@ -833,6 +842,65 @@ function renderToday(){
     <div class="notes">${body || `<div class="empty">Дел с датами пока нет. Допишите к строке дату: <b>@сегодня</b>, <b>@завтра</b>, <b>@пт</b>, <b>@20.10</b> или <b>@20 окт</b>, и она появится здесь.</div>`}</div>`;
 }
 
+/* ================= Привычки =================
+   «[.] Зарядка @каждый день», «@ежедневно», «@будни», «@выходные», «@пн,ср,пт».
+   Галочка ставится на сегодня и сама снимается на следующий день; считается серия дней подряд. */
+const HABIT_RE = /(?:^|\s)@(каждый день|ежедневно|будни|выходные|(?:пн|вт|ср|чт|пт|сб|вс)(?:\s*,\s*(?:пн|вт|ср|чт|пт|сб|вс))+)(?=$|[\s.;!?)])/i;
+function syncHabit(b){
+  if(b.type !== "check"){ if(b.habit) delete b.habit; return; }
+  const m = b.text.match(HABIT_RE);
+  if(!m){ if(b.habit){ delete b.habit; } return; }
+  const t = m[1].toLowerCase().replace(/\s+/g, "");
+  b.habit = t === "каждыйдень" || t === "ежедневно" ? "daily" : t === "будни" ? "weekdays" : t === "выходные" ? "weekend" : t;
+  b.hist = b.hist || {};
+  delete b.date; delete b.dtok;
+}
+function habitDue(spec, d){
+  const w = d.getDay();
+  if(spec === "daily") return true;
+  if(spec === "weekdays") return w >= 1 && w <= 5;
+  if(spec === "weekend") return w === 0 || w === 6;
+  return spec.split(",").includes(WD[w]);
+}
+function habitStreak(b){
+  const h = b.hist || {}; let n = 0;
+  const d = day0();
+  if(!h[iso(d)]) d.setDate(d.getDate() - 1);   // сегодня ещё не отмечено — серия не прерывается
+  for(let i = 0; i < 400; i++){
+    if(habitDue(b.habit, d)){ if(h[iso(d)]) n++; else break; }
+    d.setDate(d.getDate() - 1);
+  }
+  return n;
+}
+/* показать галочку за сегодня; старую историю подрезаем */
+function refreshHabit(b){
+  const h = b.hist || (b.hist = {}), today = iso(day0());
+  b.done = !!h[today];
+  const keys = Object.keys(h);
+  if(keys.length > 130){ const cut = iso(new Date(Date.now() - 120 * 864e5)); keys.forEach(k => { if(k < cut) delete h[k]; }); }
+}
+function habitTag(b){
+  const h = b.hist || {}, st = habitStreak(b);
+  let dots = "";
+  for(let i = 6; i >= 0; i--){
+    const d = day0(); d.setDate(d.getDate() - i);
+    const due = habitDue(b.habit, d), k = iso(d);
+    dots += `<i class="${!due ? "off" : h[k] ? "y" : ""}${i === 0 ? " t" : ""}" title="${d.toLocaleDateString("ru-RU", {weekday:"short", day:"numeric"})}"></i>`;
+  }
+  return `<span class="htag">${st ? `<span class="fire" title="Дней подряд">🔥 ${st}</span>` : ""}<span class="hdots">${dots}</span></span>`;
+}
+function habitsToday(){
+  const out = [], today = day0();
+  for(const x of everyNote()){
+    if(x.n.kind === "budget") continue;
+    for(const b of x.n.blocks){
+      if(!b.habit || !habitDue(b.habit, today)) continue;
+      out.push({x, b, label:b.text.replace(HABIT_RE, " ").trim() || "Привычка", doneToday:!!(b.hist || {})[iso(today)], streak:habitStreak(b)});
+    }
+  }
+  return out.sort((a, c) => a.doneToday - c.doneToday);
+}
+
 /* ================= Тема ================= */
 let themeMode = "auto";
 try{ themeMode = localStorage.getItem("notes-theme") || "auto"; }catch(e){}
@@ -1004,6 +1072,7 @@ function renderEditor(){
   if(!n){ el.innerHTML = `<div class="placeholder"><div class="ph-in">${mascotSVG(mascotKind, 110)}<div>Выберите заметку или создайте новую</div></div></div>`; return; }
   const isBudget = n.kind === "budget";
   if(isBudget) budgetMonthReset(n);
+  else n.blocks.forEach(b => { if(b.habit) refreshHabit(b); });
   const dueMap = {};
   if(isBudget) budgetOf(n).pays.forEach(x => dueMap[x.b.id] = x);
   const checks = n.blocks.filter(b => b.type === "check");
@@ -1053,7 +1122,7 @@ function render(){
   requestAnimationFrame(() => document.querySelectorAll("#blocks textarea").forEach(autosize));
 }
 
-function touch(){ const n = note(); if(n){ n.updated = Date.now(); if(n.kind !== "budget") n.blocks.forEach(syncDate); } changed(); }
+function touch(){ const n = note(); if(n){ n.updated = Date.now(); if(n.kind !== "budget") n.blocks.forEach(b => { syncHabit(b); syncDate(b); }); } changed(); }
 function refreshSide(){ renderList(); renderFolders(); }
 
 /* ================= Бюджет =================
@@ -1458,7 +1527,11 @@ $("#app").addEventListener("input", e => {
   const blk = e.target.closest(".block"); if(!blk) return;
   const i = n.blocks.findIndex(x => x.id === blk.dataset.b); if(i < 0) return;
   const b = n.blocks[i];
-  if(e.target.type === "checkbox"){ b.done = e.target.checked; redraw(); if(b.done) hop(); return; }
+  if(e.target.type === "checkbox"){
+    b.done = e.target.checked;
+    if(b.habit){ b.hist = b.hist || {}; const k = iso(day0()); if(b.done) b.hist[k] = true; else delete b.hist[k]; }
+    redraw(); if(b.done) hop(); return;
+  }
   const val = e.target.value;
   if(val.includes("\n")){
     const lines = val.split(/\r?\n/);
