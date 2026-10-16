@@ -180,9 +180,10 @@ mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding
 .theme-btn .ti{width:12px;display:grid;place-items:center;font-size:13px;margin-left:-2px}
 
 /* Выделение всей заметки (Ctrl+A дважды) */
-#blocks.allsel .block{background:var(--accent-soft);border-radius:4px}
-#blocks.allsel textarea::selection{background:transparent}
-#blocks.allsel .block.image img{outline:2px solid var(--accent)}
+#blocks .block.sel{background:var(--accent-soft);border-radius:4px}
+#blocks .block.sel textarea::selection{background:transparent}
+#blocks .block.sel textarea:focus-visible{outline:none}
+#blocks .block.sel.image img{outline:2px solid var(--accent)}
 
 /* Привычки */
 .htag{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);white-space:nowrap;padding-top:4px;flex:none}
@@ -1786,8 +1787,10 @@ $("#app").addEventListener("input", e => {
   if(n.kind === "budget"){ const pnl = $("#budgetPanel"); if(pnl) pnl.outerHTML = budgetPanel(n); }
 });
 
-/* ===== Вся заметка: Ctrl+A второй раз выделяет все строки ===== */
-let allSel = false;
+/* ===== Выделение нескольких строк: протянуть мышкой или Ctrl+A второй раз ===== */
+let selRange = null;          // {a, b} — индексы первой и последней выделенной строки
+let allSel = false;           // есть ли выделение строк
+let drag = null;              // {start} — с какой строки начали тянуть
 const PRIO_PREFIX = {red:"!! ", yellow:"! ", green:"~ "};
 function blockText(b){
   if(b.type === "image") return "";
@@ -1797,25 +1800,60 @@ function blockText(b){
 function noteText(n){
   return [n.title, ...n.blocks.filter(b => b.type !== "image").map(blockText)].filter((x, i) => i > 0 || x).join("\n");
 }
+function rangeText(){
+  const n = note(); if(!n || !selRange) return "";
+  return n.blocks.slice(selRange.a, selRange.b + 1).filter(b => b.type !== "image").map(blockText).join("\n");
+}
 function fallbackCopy(txt){
   const ta = document.createElement("textarea"); ta.value = txt; ta.style.position = "fixed"; ta.style.opacity = "0";
   document.body.appendChild(ta); ta.select(); let ok = false;
   try{ ok = document.execCommand("copy"); }catch(e){}
   ta.remove(); return ok;
 }
-function setAllSel(on){
-  allSel = on;
-  const bl = $("#blocks"); if(bl) bl.classList.toggle("allsel", on);
+function paintSel(){
+  document.querySelectorAll("#blocks .block").forEach((el, i) => el.classList.toggle("sel", !!selRange && i >= selRange.a && i <= selRange.b));
 }
-/* заменить всё содержимое заметки строками текста */
-function replaceAll(text){
-  const n = note(); if(!n) return;
-  const lines = text.split(/\r?\n/);
-  n.blocks = lines.map(parseLine);
-  setAllSel(false);
-  const last = n.blocks[n.blocks.length - 1];
-  redraw(last.id, last.text.length);
+function setSel(a, b){
+  if(a == null){ selRange = null; allSel = false; paintSel(); return; }
+  selRange = {a: Math.min(a, b), b: Math.max(a, b)}; allSel = true; paintSel();
 }
+function setAllSel(on){ const n = note(); on && n ? setSel(0, n.blocks.length - 1) : setSel(null); }
+/* заменить выделенные строки текстом (пустая строка — просто стереть) */
+function replaceSel(text, remove){
+  const n = note(); if(!n || !selRange) return;
+  const {a, b} = selRange;
+  const lines = remove ? [] : text.split(/\r?\n/).map(parseLine);
+  n.blocks.splice(a, b - a + 1, ...lines);
+  if(!n.blocks.length) n.blocks.push(parseLine(""));
+  setSel(null);
+  const focus = lines.length ? lines[lines.length - 1] : n.blocks[Math.min(a, n.blocks.length - 1)];
+  redraw(focus.id, lines.length ? focus.text.length : (remove && a > 0 ? null : 0));
+}
+function blockIndexAt(x, y){
+  const els = [...document.querySelectorAll("#blocks .block")]; if(!els.length) return -1;
+  const hit = document.elementFromPoint(x, y)?.closest?.("#blocks .block");
+  if(hit) return els.indexOf(hit);
+  if(y < els[0].getBoundingClientRect().top) return 0;
+  if(y > els[els.length - 1].getBoundingClientRect().bottom) return els.length - 1;
+  return -1;
+}
+/* мышью: зажали на строке и повели на другую — выделяются целые строки */
+$("#app").addEventListener("mousedown", e => {
+  if(e.button !== 0) return;
+  const blk = e.target.closest && e.target.closest("#blocks .block");
+  if(!blk || e.target.closest("button, input[type=checkbox]")) return;
+  drag = {start: [...document.querySelectorAll("#blocks .block")].indexOf(blk), el: e.target.tagName === "TEXTAREA" ? e.target : null};
+});
+document.addEventListener("mousemove", e => {
+  if(!drag || !(e.buttons & 1)) return;
+  const i = blockIndexAt(e.clientX, e.clientY); if(i < 0) return;
+  if(i === drag.start){ if(allSel) setSel(null); return; }
+  e.preventDefault();
+  if(drag.el){ const p = drag.el.selectionStart; drag.el.setSelectionRange(p, p); if(document.activeElement !== drag.el) drag.el.focus(); }
+  setSel(drag.start, i);
+});
+document.addEventListener("mouseup", () => { drag = null; });
+
 $("#app").addEventListener("keydown", e => {
   const inBlocks = e.target.tagName === "TEXTAREA" && e.target.closest && e.target.closest("#blocks");
   const mod = e.ctrlKey || e.metaKey;
@@ -1826,16 +1864,17 @@ $("#app").addEventListener("keydown", e => {
   }
   if(allSel && inBlocks){
     if(mod && (e.code === "KeyC" || e.code === "KeyX" || e.code === "KeyV")) return;   // обработают copy / cut / paste
-    if(e.key === "Backspace" || e.key === "Delete"){ e.preventDefault(); e.stopImmediatePropagation(); replaceAll(""); return; }
-    if(e.key.length === 1 && !mod && !e.altKey){ e.preventDefault(); e.stopImmediatePropagation(); replaceAll(e.key); return; }
-    if(["Escape","ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Home","End","Enter","Tab"].includes(e.key)){ setAllSel(false); e.stopImmediatePropagation(); if(e.key === "Escape" || e.key === "Enter") e.preventDefault(); return; }
+    if(e.key === "Backspace" || e.key === "Delete"){ e.preventDefault(); e.stopImmediatePropagation(); replaceSel("", true); return; }
+    if(e.key.length === 1 && !mod && !e.altKey){ e.preventDefault(); e.stopImmediatePropagation(); replaceSel(e.key); return; }
+    if(["Escape","ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Home","End","Enter","Tab"].includes(e.key)){ setSel(null); e.stopImmediatePropagation(); if(e.key === "Escape" || e.key === "Enter") e.preventDefault(); return; }
     return;
   }
 });
-document.addEventListener("copy", e => { if(!allSel || !note()) return; e.preventDefault(); e.clipboardData.setData("text/plain", noteText(note()).split("\n").slice(1).join("\n")); });
-document.addEventListener("cut", e => { if(!allSel || !note()) return; e.preventDefault(); e.clipboardData.setData("text/plain", noteText(note()).split("\n").slice(1).join("\n")); replaceAll(""); });
-document.addEventListener("mousedown", () => { if(allSel) setAllSel(false); }, true);
-document.addEventListener("focusout", e => { if(allSel && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest("#blocks"))) setTimeout(() => { if(!$("#blocks")?.contains(document.activeElement)) setAllSel(false); }, 0); });
+document.addEventListener("copy", e => { if(!allSel || !note()) return; e.preventDefault(); e.clipboardData.setData("text/plain", rangeText()); });
+document.addEventListener("cut", e => { if(!allSel || !note()) return; e.preventDefault(); e.clipboardData.setData("text/plain", rangeText()); replaceSel("", true); });
+/* клик (без протягивания) снимает выделение строк */
+document.addEventListener("mousedown", e => { if(allSel && !(e.shiftKey)) setSel(null); }, true);
+document.addEventListener("focusout", () => { if(allSel) setTimeout(() => { if(!$("#blocks")?.contains(document.activeElement)) setSel(null); }, 0); });
 
 $("#app").addEventListener("keydown", e => {
   if(allSel) return;
@@ -1890,8 +1929,8 @@ $("#app").addEventListener("keydown", e => {
 $("#app").addEventListener("paste", e => {
   if(allSel && note()){
     const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
-    if(!files.length){ e.preventDefault(); replaceAll(e.clipboardData.getData("text/plain") || ""); return; }
-    setAllSel(false);
+    if(!files.length){ e.preventDefault(); replaceSel(e.clipboardData.getData("text/plain") || ""); return; }
+    setSel(null);
   }
   if(!note() || !$("#editor").contains(e.target)) return;
   const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
