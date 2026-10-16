@@ -179,6 +179,11 @@ mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding
 .note .line .lbox{width:11px;height:11px;border:1.5px solid var(--muted);border-radius:3px;flex:none;align-self:center}
 .theme-btn .ti{width:12px;display:grid;place-items:center;font-size:13px;margin-left:-2px}
 
+/* Выделение всей заметки (Ctrl+A дважды) */
+#blocks.allsel .block{background:var(--accent-soft);border-radius:4px}
+#blocks.allsel textarea::selection{background:transparent}
+#blocks.allsel .block.image img{outline:2px solid var(--accent)}
+
 /* Привычки */
 .htag{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);white-space:nowrap;padding-top:4px;flex:none}
 .htag .fire{color:var(--yellow);font-weight:600;font-variant-numeric:tabular-nums}
@@ -1096,6 +1101,7 @@ function renderEditor(){
       <button class="chip back" id="back">← Назад</button>
       <button class="chip" id="addImg">Картинка</button>
       <button class="chip${isBudget ? " on-acc" : ""}" id="budgetBtn" title="${isBudget ? "Сделать обычной заметкой" : "Считать как бюджет"}">Бюджет</button>
+      <button class="chip" id="copyBtn" title="Скопировать всю заметку">Копировать</button>
       <button class="chip${n.pinned ? " on-acc" : ""}" id="pinBtn" title="${n.pinned ? "Открепить" : "Закрепить сверху списка"}">${n.pinned ? "Закреплено" : "Закрепить"}</button>
       <span class="prio-pick" aria-label="Метка заметки">${["red","yellow","green"].map(c =>
         `<button data-prio="${c}" class="${n.prio===c?"on":""}" title="${{red:"Срочно",yellow:"Скоро",green:"Не горит"}[c]}"><span class="pdot ${c}"></span></button>`).join("")}</span>
@@ -1652,6 +1658,13 @@ $("#app").addEventListener("click", e => {
   if(t.dataset.go){ goTo(t.dataset.go); return; }
   if(id === "todayBtn"){ view = view === "today" ? null : "today"; query = ""; $("#q").value = ""; reading = false; render(); return; }
   if(id === "themeBtn"){ themeMode = THEME_NEXT[themeMode]; try{ localStorage.setItem("notes-theme", themeMode); }catch(e){} applyTheme(); renderFolders(); return; }
+  if(id === "copyBtn"){
+    const txt = noteText(note());
+    const ok = () => { t.textContent = "Скопировано"; setTimeout(() => { if(t.isConnected) t.textContent = "Копировать"; }, 1500); };
+    if(navigator.clipboard) navigator.clipboard.writeText(txt).then(ok, () => fallbackCopy(txt) && ok());
+    else if(fallbackCopy(txt)) ok();
+    return;
+  }
   if(id === "pinBtn"){ const n = note(); n.pinned = !n.pinned; if(!n.pinned) delete n.pinned; redraw(); return; }
   if(id === "urgentBtn"){ view = view === "urgent" ? null : "urgent"; query = ""; $("#q").value = ""; reading = false; render(); return; }
   if(id === "closeView"){ view = null; confirmEmpty = false; renderList(); renderFolders(); return; }
@@ -1773,7 +1786,59 @@ $("#app").addEventListener("input", e => {
   if(n.kind === "budget"){ const pnl = $("#budgetPanel"); if(pnl) pnl.outerHTML = budgetPanel(n); }
 });
 
+/* ===== Вся заметка: Ctrl+A второй раз выделяет все строки ===== */
+let allSel = false;
+const PRIO_PREFIX = {red:"!! ", yellow:"! ", green:"~ "};
+function blockText(b){
+  if(b.type === "image") return "";
+  const box = b.type === "check" ? (b.done ? "[x] " : "[.] ") : "";
+  return box + (b.prio ? PRIO_PREFIX[b.prio] : "") + b.text;
+}
+function noteText(n){
+  return [n.title, ...n.blocks.filter(b => b.type !== "image").map(blockText)].filter((x, i) => i > 0 || x).join("\n");
+}
+function fallbackCopy(txt){
+  const ta = document.createElement("textarea"); ta.value = txt; ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select(); let ok = false;
+  try{ ok = document.execCommand("copy"); }catch(e){}
+  ta.remove(); return ok;
+}
+function setAllSel(on){
+  allSel = on;
+  const bl = $("#blocks"); if(bl) bl.classList.toggle("allsel", on);
+}
+/* заменить всё содержимое заметки строками текста */
+function replaceAll(text){
+  const n = note(); if(!n) return;
+  const lines = text.split(/\r?\n/);
+  n.blocks = lines.map(parseLine);
+  setAllSel(false);
+  const last = n.blocks[n.blocks.length - 1];
+  redraw(last.id, last.text.length);
+}
 $("#app").addEventListener("keydown", e => {
+  const inBlocks = e.target.tagName === "TEXTAREA" && e.target.closest && e.target.closest("#blocks");
+  const mod = e.ctrlKey || e.metaKey;
+  if(inBlocks && mod && e.code === "KeyA"){
+    const t = e.target, whole = t.selectionStart === 0 && t.selectionEnd === t.value.length;
+    if(allSel || whole || !t.value){ e.preventDefault(); setAllSel(true); }
+    return;
+  }
+  if(allSel && inBlocks){
+    if(mod && (e.code === "KeyC" || e.code === "KeyX" || e.code === "KeyV")) return;   // обработают copy / cut / paste
+    if(e.key === "Backspace" || e.key === "Delete"){ e.preventDefault(); e.stopImmediatePropagation(); replaceAll(""); return; }
+    if(e.key.length === 1 && !mod && !e.altKey){ e.preventDefault(); e.stopImmediatePropagation(); replaceAll(e.key); return; }
+    if(["Escape","ArrowUp","ArrowDown","ArrowLeft","ArrowRight","Home","End","Enter","Tab"].includes(e.key)){ setAllSel(false); e.stopImmediatePropagation(); if(e.key === "Escape" || e.key === "Enter") e.preventDefault(); return; }
+    return;
+  }
+});
+document.addEventListener("copy", e => { if(!allSel || !note()) return; e.preventDefault(); e.clipboardData.setData("text/plain", noteText(note()).split("\n").slice(1).join("\n")); });
+document.addEventListener("cut", e => { if(!allSel || !note()) return; e.preventDefault(); e.clipboardData.setData("text/plain", noteText(note()).split("\n").slice(1).join("\n")); replaceAll(""); });
+document.addEventListener("mousedown", () => { if(allSel) setAllSel(false); }, true);
+document.addEventListener("focusout", e => { if(allSel && !(e.relatedTarget && e.relatedTarget.closest && e.relatedTarget.closest("#blocks"))) setTimeout(() => { if(!$("#blocks")?.contains(document.activeElement)) setAllSel(false); }, 0); });
+
+$("#app").addEventListener("keydown", e => {
+  if(allSel) return;
   const n = note(); if(!n) return;
   if(e.target.id === "title" && (e.key === "Enter" || e.key === "ArrowDown")){
     e.preventDefault(); const j = editableNear(n, -1, 1);
@@ -1823,6 +1888,11 @@ $("#app").addEventListener("keydown", e => {
 
 /* Вставка картинки из буфера (Ctrl+V) и перетаскивание файлов в заметку */
 $("#app").addEventListener("paste", e => {
+  if(allSel && note()){
+    const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
+    if(!files.length){ e.preventDefault(); replaceAll(e.clipboardData.getData("text/plain") || ""); return; }
+    setAllSel(false);
+  }
   if(!note() || !$("#editor").contains(e.target)) return;
   const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
   if(files.length){ e.preventDefault(); addImages(files); }
