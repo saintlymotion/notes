@@ -325,7 +325,7 @@ function sample(){
         {id:"t1",name:"Прохождение",updated:now,notes:[
           {id:"n2",title:"Пример: боссы",updated:now-3600000,blocks:[b("check","Первый босс",true),b("check","Второй босс")]}]}]}
     ],
-    deleted:{},
+    deleted:{}, trash:[],
     cur:{folder:"f1", thread:null, note:"n1"}
   };
 }
@@ -395,7 +395,10 @@ function merge(a, b){
   const trash = [...tm.values()].filter(e => !alive.has(e.id) && e.at > month).sort((x, y) => y.at - x.at);
   return {folders, deleted, trash, cur:a.cur};
 }
-const strip = s => JSON.stringify({folders:s.folders, deleted:s.deleted, trash:s.trash});
+/* Сравнение без учёта порядка полей: база (jsonb) возвращает поля в своём порядке, это не изменение */
+const canon = v => JSON.stringify(v, (k, x) => x && typeof x === "object" && !Array.isArray(x)
+  ? Object.keys(x).sort().reduce((o, key) => (o[key] = x[key], o), {}) : x);
+const strip = s => canon({folders:s.folders, deleted:s.deleted || {}, trash:s.trash || []});
 
 /* ================= Синхронизация ================= */
 const CFG = window.NOTES_CONFIG || {};
@@ -438,13 +441,14 @@ async function doSync(){
     const {data, error} = await sb.from("notes_state").select("data").eq("user_id", session.user.id).maybeSingle();
     if(error) throw error;
     const remote = data && normalize(data.data);
-    const before = strip(state);
     const merged = remote ? merge(state, remote) : state;
     if(!remote || strip(merged) !== strip(remote)){
       const {error: e2} = await sb.from("notes_state").upsert({user_id: session.user.id, data: {folders:merged.folders, deleted:merged.deleted, trash:merged.trash}, updated_at: new Date().toISOString()});
       if(e2) throw e2;
     }
-    if(strip(merged) !== before) applyRemote(merged);
+    // пока шёл запрос, могли напечатать ещё: сливаем ещё раз, и свежие правки на устройстве побеждают
+    const fin = merge(state, merged);
+    if(strip(fin) !== strip(state)) applyRemote(fin);
     setSync("ok");
   }catch(e){
     setSync(navigator.onLine ? "error" : "offline", e && e.message ? e.message : String(e));
@@ -462,12 +466,19 @@ function fixCur(){
 }
 /* Применить пришедшие изменения, не сбивая курсор, если открытая заметка не поменялась */
 function applyRemote(merged){
-  const curBefore = JSON.stringify(note() || null);
+  const curBefore = canon(note() || null);
+  // запомнить, где стоит курсор, чтобы вернуть его после перерисовки
+  const ae = document.activeElement, blk = ae && ae.closest && ae.closest("#blocks .block");
+  const caret = ae && ae.tagName === "TEXTAREA" && blk ? {id:blk.dataset.b, s:ae.selectionStart, e:ae.selectionEnd}
+    : ae && ae.id === "title" ? {id:null, s:ae.selectionStart, e:ae.selectionEnd} : null;
   state.folders = merged.folders; state.deleted = merged.deleted; state.trash = merged.trash;
   fixCur(); saveLocal();
-  const editing = document.activeElement && $("#editor").contains(document.activeElement);
-  if(editing && JSON.stringify(note() || null) === curBefore){ renderFolders(); renderList(); }
-  else render();
+  if(canon(note() || null) === curBefore){ if(!editing) renderFolders(); renderList(); return; }
+  render();
+  if(caret){
+    const t = caret.id ? document.querySelector(`[data-b="${caret.id}"] textarea`) : $("#title");
+    if(t){ const L = t.value.length; t.focus(); t.setSelectionRange(Math.min(caret.s, L), Math.min(caret.e, L)); }
+  }
 }
 
 if(sb){
