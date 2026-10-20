@@ -185,6 +185,21 @@ mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding
 #blocks .block.sel textarea:focus-visible{outline:none}
 #blocks .block.sel.image img{outline:2px solid var(--accent)}
 
+/* Пароль на бюджет */
+.lockbox{display:flex;flex-direction:column;align-items:center;gap:12px;max-width:320px;width:100%}
+.lockbox h3{margin:0;font-family:var(--f-title);font-size:20px;color:var(--fg)}
+.lk-form{display:flex;gap:8px;width:100%;flex-wrap:wrap}
+.lk-form input, .lk-grid input{flex:1;min-width:0;padding:9px 10px;border:1px solid var(--line);border-radius:var(--r);background:var(--bg);color:var(--fg);font:inherit}
+.lk-forgot{font-size:13px;width:100%}
+.lk-forgot summary{cursor:pointer;color:var(--muted);text-align:center}
+.lk-forgot form{margin-top:10px}
+.lk-forgot p{margin:0 0 4px;width:100%;color:var(--muted)}
+.lk-note{font-size:13px;color:var(--muted);margin:0}
+.lkpanel{border:1px solid var(--line);border-radius:12px;padding:14px 16px;display:flex;flex-direction:column;gap:10px;margin-bottom:14px}
+.lk-grid{display:flex;flex-direction:column;gap:8px}
+@media (min-width:821px){.ed-bar.lockbar{display:none}}
+.lk-row{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+
 /* Привычки */
 .htag{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);white-space:nowrap;padding-top:4px;flex:none}
 .htag .fire{color:var(--yellow);font-weight:600;font-variant-numeric:tabular-nums}
@@ -344,6 +359,7 @@ function normalize(s){
   if(!Array.isArray(s.folders)) return null;
   s.deleted = s.deleted || {};
   s.trash = Array.isArray(s.trash) ? s.trash : [];
+  if(s.lock && typeof s.lock !== "object") delete s.lock;
   s.cur = s.cur || {};
   const fixNotes = ns => (ns || []).map(n => ({...n, blocks:n.blocks || [], updated:n.updated || 0}));
   s.folders = s.folders.map(f => ({...f, updated:f.updated || 0, notes:fixNotes(f.notes),
@@ -393,12 +409,14 @@ function merge(a, b){
   const tm = new Map();
   for(const e of [...(a.trash || []), ...(b.trash || [])]) if(!tm.has(e.id) || tm.get(e.id).at < e.at) tm.set(e.id, e);
   const trash = [...tm.values()].filter(e => !alive.has(e.id) && e.at > month).sort((x, y) => y.at - x.at);
-  return {folders, deleted, trash, cur:a.cur};
+  // пароль бюджета: побеждает более свежая установка или снятие
+  const lock = !a.lock ? b.lock : !b.lock ? a.lock : ((b.lock.at || 0) > (a.lock.at || 0) ? b.lock : a.lock);
+  return {folders, deleted, trash, lock, cur:a.cur};
 }
 /* Сравнение без учёта порядка полей: база (jsonb) возвращает поля в своём порядке, это не изменение */
 const canon = v => JSON.stringify(v, (k, x) => x && typeof x === "object" && !Array.isArray(x)
   ? Object.keys(x).sort().reduce((o, key) => (o[key] = x[key], o), {}) : x);
-const strip = s => canon({folders:s.folders, deleted:s.deleted || {}, trash:s.trash || []});
+const strip = s => canon({folders:s.folders, deleted:s.deleted || {}, trash:s.trash || [], lock:s.lock || null});
 
 /* ================= Синхронизация ================= */
 const CFG = window.NOTES_CONFIG || {};
@@ -443,7 +461,7 @@ async function doSync(){
     const remote = data && normalize(data.data);
     const merged = remote ? merge(state, remote) : state;
     if(!remote || strip(merged) !== strip(remote)){
-      const {error: e2} = await sb.from("notes_state").upsert({user_id: session.user.id, data: {folders:merged.folders, deleted:merged.deleted, trash:merged.trash}, updated_at: new Date().toISOString()});
+      const {error: e2} = await sb.from("notes_state").upsert({user_id: session.user.id, data: {folders:merged.folders, deleted:merged.deleted, trash:merged.trash, lock:merged.lock || null}, updated_at: new Date().toISOString()});
       if(e2) throw e2;
     }
     // пока шёл запрос, могли напечатать ещё: сливаем ещё раз, и свежие правки на устройстве побеждают
@@ -471,7 +489,7 @@ function applyRemote(merged){
   const ae = document.activeElement, blk = ae && ae.closest && ae.closest("#blocks .block");
   const caret = ae && ae.tagName === "TEXTAREA" && blk ? {id:blk.dataset.b, s:ae.selectionStart, e:ae.selectionEnd}
     : ae && ae.id === "title" ? {id:null, s:ae.selectionStart, e:ae.selectionEnd} : null;
-  state.folders = merged.folders; state.deleted = merged.deleted; state.trash = merged.trash;
+  state.folders = merged.folders; state.deleted = merged.deleted; state.trash = merged.trash; if(merged.lock) state.lock = merged.lock;
   fixCur(); saveLocal();
   if(canon(note() || null) === curBefore){ if(!editing) renderFolders(); renderList(); return; }
   render();
@@ -555,7 +573,7 @@ function compress(file){
   });
 }
 async function addImages(files){
-  const n = note(); if(!n) return;
+  const n = note(); if(!n || isLocked(n)) return;
   const imgs = [...files].filter(f => f.type.startsWith("image/")); if(!imgs.length) return;
   let i = n.blocks.findIndex(b => b.id === lastFocus);
   if(i < 0) i = n.blocks.length - 1;
@@ -646,7 +664,7 @@ $("#importFile").addEventListener("change", async e => {
     const s = normalize(JSON.parse(await f.text()));
     if(!s) throw new Error();
     const merged = merge(state, s);
-    state.folders = merged.folders; state.deleted = merged.deleted; state.trash = merged.trash;
+    state.folders = merged.folders; state.deleted = merged.deleted; state.trash = merged.trash; if(merged.lock) state.lock = merged.lock;
     fixCur(); changed(); render();
     m.className = "msg ok"; m.textContent = "Заметки из файла добавлены.";
   }catch(err){ m.className = "msg err"; m.textContent = "Это не файл копии заметок."; }
@@ -659,7 +677,93 @@ let view = null, query = "";   // view: "urgent" — экран «Срочное
 const PRIO_RANK = {red:3, yellow:2, green:1};
 const PRIO_NEXT = {red:"yellow", yellow:"green", green:null};
 /* Самая сильная метка заметки: своя или любой незакрытой строки */
+/* ================= Пароль на бюджет =================
+   Хранится только хеш (PBKDF2), синхронизируется между устройствами. Это замок от чужих глаз на устройстве,
+   а не шифрование: сами записи хранятся как обычно. */
+let unlocked = false, lockPanel = false, hiddenAt = 0;
+const LOCK_AFTER = 5 * 60e3;   // свернули приложение дольше чем на 5 минут — бюджет снова закрыт
+const lockOn = () => !!(state.lock && !state.lock.off && state.lock.hash);
+const isLocked = n => !!n && n.kind === "budget" && lockOn() && !unlocked;
+const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const unb64 = str => Uint8Array.from(atob(str), c => c.charCodeAt(0));
+async function pwHash(pw, saltB64){
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveBits"]);
+  const bits = await crypto.subtle.deriveBits({name:"PBKDF2", salt:unb64(saltB64), iterations:150000, hash:"SHA-256"}, key, 256);
+  return b64(bits);
+}
+async function pwCheck(pw){ return lockOn() && await pwHash(pw, state.lock.salt) === state.lock.hash; }
+async function pwSet(pw){
+  const salt = b64(crypto.getRandomValues(new Uint8Array(16)));
+  state.lock = {salt, hash: await pwHash(pw, salt), at: Date.now()};
+  changed();
+}
+function pwRemove(){ state.lock = {at: Date.now(), off: true}; changed(); }
+function lockNow(){
+  unlocked = false; lockPanel = false;
+  if(note()?.kind === "budget"){ renderEditor(); }
+  renderList();
+}
+document.addEventListener("visibilitychange", () => {
+  if(document.visibilityState === "hidden") hiddenAt = Date.now();
+  else if(unlocked && hiddenAt && Date.now() - hiddenAt > LOCK_AFTER) lockNow();
+});
+function lockScreen(){
+  const forgot = session
+    ? `<details class="lk-forgot"><summary>Забыли пароль?</summary><form id="resetForm" class="lk-form"><p>Введите пароль от аккаунта синхронизации (${esc(session.user.email)}), и пароль бюджета будет снят.</p><input type="password" id="resetPw" placeholder="Пароль от аккаунта" autocomplete="current-password"><button class="chip" type="submit">Сбросить</button></form></details>`
+    : `<div class="lk-note">Забыли пароль? Сбросить его можно, войдя в аккаунт синхронизации.</div>`;
+  return `<div class="ed-bar lockbar"><button class="chip back" id="back">← Назад</button></div>
+    <div class="placeholder"><div class="lockbox">
+      ${mascotSVG(mascotKind, 96)}
+      <h3>Бюджет под паролем</h3>
+      <form id="unlockForm" class="lk-form"><input type="password" id="unlockPw" placeholder="Пароль" autocomplete="current-password" aria-label="Пароль"><button class="chip primary" type="submit">Открыть</button></form>
+      <div class="msg" id="lockMsg"></div>
+      ${forgot}
+    </div></div>`;
+}
+function lockPanelHTML(){
+  if(!lockPanel) return "";
+  const warn = session ? "" : `<p class="lk-note">Вы не вошли в аккаунт синхронизации: если забудете пароль, сбросить его будет нельзя.</p>`;
+  return lockOn()
+    ? `<div class="lkpanel"><div class="lk-row"><b>Пароль на бюджеты включён</b><button class="chip" id="lockNowBtn">Заблокировать сейчас</button></div>
+        <form id="pwChangeForm" class="lk-grid">
+          <input type="password" id="pwCur" placeholder="Текущий пароль" autocomplete="current-password">
+          <input type="password" id="pwNew" placeholder="Новый пароль" autocomplete="new-password">
+          <input type="password" id="pwNew2" placeholder="Повторите новый" autocomplete="new-password">
+          <div class="lk-row"><button class="chip primary" type="submit">Сменить пароль</button><button class="chip danger" type="button" id="pwRemoveBtn">Убрать пароль</button></div>
+        </form><div class="msg" id="pwMsg"></div></div>`
+    : `<div class="lkpanel"><b>Пароль на все бюджеты</b>
+        <p class="lk-note">Без пароля бюджет не откроется, а суммы не будут видны в списке и поиске. Свернёте приложение дольше чем на 5 минут — бюджет закроется снова.</p>${warn}
+        <form id="pwSetForm" class="lk-grid">
+          <input type="password" id="pwNew" placeholder="Пароль, от 4 символов" autocomplete="new-password">
+          <input type="password" id="pwNew2" placeholder="Повторите пароль" autocomplete="new-password">
+          <div class="lk-row"><button class="chip primary" type="submit">Поставить пароль</button></div>
+        </form><div class="msg" id="pwMsg"></div></div>`;
+}
+const pwMsg = (t, ok) => { const m = $("#pwMsg") || $("#lockMsg"); if(m){ m.className = "msg " + (ok ? "ok" : "err"); m.textContent = t; } };
+$("#app").addEventListener("submit", async e => {
+  const id = e.target.id; if(!["unlockForm","resetForm","pwSetForm","pwChangeForm"].includes(id)) return;
+  e.preventDefault();
+  if(id === "unlockForm"){
+    const pw = $("#unlockPw").value;
+    if(await pwCheck(pw)){ unlocked = true; renderEditor(); renderList(); }
+    else { pwMsg("Неверный пароль"); $("#unlockPw").select(); }
+    return;
+  }
+  if(id === "resetForm"){
+    const {error} = await sb.auth.signInWithPassword({email: session.user.email, password: $("#resetPw").value});
+    if(error){ pwMsg("Пароль от аккаунта не подошёл"); return; }
+    pwRemove(); unlocked = true; renderEditor(); renderList(); return;
+  }
+  const nw = $("#pwNew").value, nw2 = $("#pwNew2").value;
+  if(id === "pwChangeForm" && !(await pwCheck($("#pwCur").value))){ pwMsg("Текущий пароль неверный"); return; }
+  if(nw.length < 4){ pwMsg("Пароль должен быть не короче 4 символов"); return; }
+  if(nw !== nw2){ pwMsg("Пароли не совпадают"); return; }
+  await pwSet(nw); unlocked = true; lockPanel = false; renderEditor(); renderList();
+  const b = $("#lockBtn"); if(b){ b.textContent = "Пароль ✓"; setTimeout(() => { if(b.isConnected) b.textContent = "Пароль"; }, 1500); }
+});
+
 function notePrio(n){
+  if(isLocked(n)) return n.prio || null;
   let best = n.prio || null;
   for(const b of n.blocks) if(b.prio && !(b.type === "check" && b.done) && (PRIO_RANK[b.prio] > (PRIO_RANK[best] || 0))) best = b.prio;
   return best;
@@ -690,7 +794,7 @@ function renderResults(){
   const item = (x, extra) => `<button class="note ${x.n.id===state.cur.note?"on":""}" data-go="${x.n.id}"><b>${notePrio(x.n) ? `<span class="pdot ${notePrio(x.n)}"></span>` : ""}${hl(x.n.title || "Без названия", view ? "" : query.trim())}</b><span class="where">${whereOf(x)}</span>${extra}</button>`;
   if(view === "urgent"){
     const {red, yellow} = urgentLists();
-    const hot = n => n.blocks.filter(b => b.prio && b.text.trim() && !(b.type === "check" && b.done) && b.prio !== "green")
+    const hot = n => isLocked(n) ? "" : n.blocks.filter(b => b.prio && b.text.trim() && !(b.type === "check" && b.done) && b.prio !== "green")
       .sort((a, b) => PRIO_RANK[b.prio] - PRIO_RANK[a.prio]).slice(0, 3)
       .map(b => `<span class="hot"><span class="pdot ${b.prio}"></span>${esc(b.text)}</span>`).join("");
     const sec = (title, arr) => arr.length ? `<div class="sec">${title}</div>` + arr.map(x => item(x, hot(x.n))).join("") : "";
@@ -703,7 +807,7 @@ function renderResults(){
   const found = [];
   for(const x of everyNote()){
     const inTitle = (x.n.title || "").toLowerCase().includes(q);
-    const line = x.n.blocks.find(b => b.type !== "image" && b.text.toLowerCase().includes(q));
+    const line = isLocked(x.n) ? null : x.n.blocks.find(b => b.type !== "image" && b.text.toLowerCase().includes(q));
     if(inTitle || line) found.push({x, line});
   }
   found.sort((a, b) => b.x.n.updated - a.x.n.updated);
@@ -738,6 +842,7 @@ function when(t){
     : d.toLocaleDateString("ru-RU",{day:"numeric",month:"short"});
 }
 function preview(n){
+  if(isLocked(n)) return when(n.updated) + " · 🔒 под паролем";
   if(n.kind === "budget"){ const B = budgetOf(n); if(B.free != null) return when(n.updated) + " · Свободно " + rub(B.free); if(B.pays.length) return when(n.updated) + " · Ещё заплатить " + rub(B.unpaid); }
   const checks = n.blocks.filter(b => b.type === "check");
   const first = n.blocks.find(b => b.type !== "image" && b.text.trim());
@@ -1100,6 +1205,7 @@ function renderList(){
 function renderEditor(){
   const n = note(), el = $("#editor");
   if(!n){ el.innerHTML = `<div class="placeholder"><div class="ph-in">${mascotSVG(mascotKind, 110)}<div>Выберите заметку или создайте новую</div></div></div>`; return; }
+  if(isLocked(n)){ el.innerHTML = lockScreen(); setTimeout(() => { if(!reading || innerWidth > 820) $("#unlockPw")?.focus(); }, 0); return; }
   const isBudget = n.kind === "budget";
   if(isBudget){ budgetMonthReset(n); if(syncMoney(n)) changed(); }
   else n.blocks.forEach(b => { if(b.habit) refreshHabit(b); });
@@ -1113,6 +1219,7 @@ function renderEditor(){
       <button class="chip back" id="back">← Назад</button>
       <button class="chip" id="addImg">Картинка</button>
       <button class="chip${isBudget ? " on-acc" : ""}" id="budgetBtn" title="${isBudget ? "Сделать обычной заметкой" : "Считать как бюджет"}">Бюджет</button>
+      ${isBudget ? `<button class="chip${lockPanel ? " on-acc" : ""}" id="lockBtn" title="Пароль на бюджеты">${lockOn() ? "🔒 Пароль" : "Пароль"}</button>` : ""}
       <button class="chip" id="copyBtn" title="Скопировать всю заметку">Копировать</button>
       <button class="chip${n.pinned ? " on-acc" : ""}" id="pinBtn" title="${n.pinned ? "Открепить" : "Закрепить сверху списка"}">${n.pinned ? "Закреплено" : "Закрепить"}</button>
       <span class="prio-pick" aria-label="Метка заметки">${["red","yellow","green"].map(c =>
@@ -1124,7 +1231,7 @@ function renderEditor(){
     <div class="ed-body"><div class="ed-inner">
       <input class="title" id="title" placeholder="Название" value="${esc(n.title)}">
       <div class="meta">Изменено ${when(n.updated)}</div>
-      ${isBudget ? budgetPanel(n) : ""}
+      ${isBudget ? lockPanelHTML() + budgetPanel(n) : ""}
       <div id="blocks">${n.blocks.map((b,i,a) => blockHTML(b,a.length,tagMap[b.id])).join("")}</div>
     </div></div>`;
   el.querySelectorAll("textarea").forEach(autosize);
@@ -1685,6 +1792,15 @@ $("#app").addEventListener("click", e => {
   if(id === "emptyTrash"){ confirmEmpty = true; renderList(); return; }
   if(id === "noEmpty"){ confirmEmpty = false; renderList(); return; }
   if(id === "yesEmpty"){ confirmEmpty = false; purgeTrash([...state.trash]); return; }
+  if(id === "lockBtn"){ lockPanel = !lockPanel; renderEditor(); if(lockPanel) $("#pwCur, #pwNew")?.focus(); return; }
+  if(id === "lockNowBtn"){ lockNow(); return; }
+  if(id === "pwRemoveBtn"){
+    (async () => {
+      if(!(await pwCheck($("#pwCur").value))){ pwMsg("Введите текущий пароль, чтобы убрать его"); $("#pwCur").focus(); return; }
+      pwRemove(); lockPanel = false; renderEditor(); renderList();
+    })();
+    return;
+  }
   if(id === "budgetBtn"){
     const n = note();
     if(n.kind === "budget"){ delete n.kind; redraw(); return; }
