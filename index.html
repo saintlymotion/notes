@@ -250,6 +250,13 @@ mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding
 .plan td:nth-child(3){text-align:right;color:var(--muted);width:56px;white-space:nowrap;padding-left:8px}
 .plan .pn{display:block;font-size:12px;color:var(--muted);white-space:normal}
 .plan tr.inc td{font-weight:600}
+.ptoggle{padding:0;text-align:left;font:inherit;color:inherit;display:inline-flex;align-items:center;gap:6px}
+.ptoggle:hover{color:var(--accent)}
+.ptoggle .pchev{font-size:11px;color:var(--muted)}
+.plan tr.sub td{font-size:13px;padding-top:4px;padding-bottom:4px}
+.plan tr.sub td:first-child{padding-left:16px;border-left:2px solid var(--line)}
+.plan tr.sub.paid .pl, .plan tr.sub.paid td:nth-child(2){color:var(--done);text-decoration:line-through}
+.plan .ps.ok{color:var(--ok)} .plan .ps.late{color:var(--red)} .plan .ps.soon{color:var(--yellow)}
 .plan tr.inc .pn{font-weight:400}
 .plan tr.tot td{font-weight:600;color:var(--ok)}
 .plan tr.tot.neg td, .plan .neg{color:var(--red)}
@@ -1625,6 +1632,22 @@ function budgetOf(n){
 function dayWord(n){ const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? "день" : a >= 2 && a <= 4 && (b < 12 || b > 14) ? "дня" : "дней"; }
 function peopleWord(n){ const a = n % 10, b = n % 100; return a >= 2 && a <= 4 && (b < 12 || b > 14) ? "человека" : "человек"; }
 const pctOf = (v, inc) => inc ? Math.round(v / inc * 100) + "%" : "";
+/* Обязательные платежи в плане месяца: строку можно раскрыть и увидеть каждый платёж */
+let paysOpen = false;
+try{ paysOpen = localStorage.getItem("notes-pays-open") === "1"; }catch(e){}
+function paysRows(B, P){
+  const paidN = B.pays.filter(x => x.done).length;
+  const summary = `${B.pays.length} ${B.pays.length % 10 === 1 && B.pays.length % 100 !== 11 ? "платёж" : [2,3,4].includes(B.pays.length % 10) && ![12,13,14].includes(B.pays.length % 100) ? "платежа" : "платежей"}` +
+    (paidN ? ` · оплачено ${paidN}` : "") + (B.unpaid ? ` · осталось ${rub(B.unpaid)}` : "");
+  const head = `<tr class="pays-head"><td><button class="ptoggle" id="paysToggle" aria-expanded="${paysOpen}">Обязательные платежи <span class="pchev">${paysOpen ? "▾" : "▸"}</span></button><span class="pn">${summary}</span></td><td>${rub(B.total)}</td><td>${pctOf(B.total, P.income)}</td></tr>`;
+  if(!paysOpen) return head;
+  const order = [...B.pays].sort((a, b) => (a.done - b.done) || (b.overdue - a.overdue) || ((a.due ?? 99) - (b.due ?? 99)));
+  const status = x => x.done ? `<span class="ps ok">оплачено</span>`
+    : x.overdue ? `<span class="ps late">просрочен</span>`
+    : x.left === 0 ? `<span class="ps soon">сегодня</span>`
+    : x.left != null ? `<span class="ps">через ${x.left} ${dayWord(x.left)}</span>` : "";
+  return head + order.map(x => `<tr class="sub${x.done ? " paid" : ""}"><td><span class="pl">${esc(x.label)}</span><span class="pn">${x.due != null ? `до ${x.due}-го · ` : ""}${status(x)}${x.cur ? ` · ${fmtCur(x.orig, x.cur)}` : ""}</span></td><td>${rub(x.amount)}</td><td>${pctOf(x.amount, P.income)}</td></tr>`).join("");
+}
 function budgetPanel(n){
   const B = budgetOf(n);
   const help = `<div class="bg-help">Пишите строками: <code>Есть: 85 000</code> <code>Зарплата: 10-го 40 000</code> <code>Аванс: 25-го 30 000</code> <code>Людей: 3</code>, платежи — <code>[.] Аренда 35 000 до 5</code>. Валюта: <code>Зарплата: 10-го 1 500 $</code>, <code>200 €</code>. Свои нормы: <code>Еда: 40 000</code> <code>Транспорт: 12%</code> <code>Развлечения: 5 000</code> <code>Копить: 15%</code>. Траты — <code>- 450 кофе</code>, <code>- 1 200 такси @вчера</code>. Цели — <code>Цель: Отпуск 120 000 к 01.06</code>, пополнение <code>+ 5 000 отпуск</code>. Галочки платежей снимаются 1-го числа.</div>`;
@@ -1655,7 +1678,7 @@ function budgetPanel(n){
     planHtml = `<div class="plan"><span class="bl">План на месяц${P.heads ? ` · ${P.heads} ${peopleWord(P.heads)}` : ""}</span>
       <table>
         ${P.income ? `<tr class="inc"><td>Доход</td><td>${rub(P.income)}</td><td></td></tr>` : ""}
-        ${B.total ? row("Обязательные платежи", B.total) : ""}
+        ${B.total ? paysRows(B, P) : ""}
         ${row("Еда", P.food, P.over.food ? mine("food") : P.heads ? `≈ ${rub(P.food / P.heads)} на человека` : "")}
         ${row("Транспорт", P.transport, mine("transport"))}
         ${row("Развлечения", P.fun, P.over.fun ? mine("fun") : P.heads && P.fun ? `≈ ${rub(P.fun / P.heads)} на человека` : "")}
@@ -1799,6 +1822,12 @@ $("#app").addEventListener("click", e => {
       if(!(await pwCheck($("#pwCur").value))){ pwMsg("Введите текущий пароль, чтобы убрать его"); $("#pwCur").focus(); return; }
       pwRemove(); lockPanel = false; renderEditor(); renderList();
     })();
+    return;
+  }
+  if(id === "paysToggle"){
+    paysOpen = !paysOpen;
+    try{ localStorage.setItem("notes-pays-open", paysOpen ? "1" : "0"); }catch(e){}
+    const pnl = $("#budgetPanel"); if(pnl && note()) pnl.outerHTML = budgetPanel(note());
     return;
   }
   if(id === "budgetBtn"){
