@@ -256,6 +256,8 @@ mark{background:var(--accent-soft);color:var(--accent);border-radius:3px;padding
 .plan tr.sub td{font-size:13px;padding-top:4px;padding-bottom:4px}
 .plan tr.sub td:first-child{padding-left:16px;border-left:2px solid var(--line)}
 .plan tr.sub.paid .pl, .plan tr.sub.paid td:nth-child(2){color:var(--done);text-decoration:line-through}
+.plan tr.later-h td{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding-top:10px}
+.plan tr.later td{color:var(--muted)}
 .plan .ps.ok{color:var(--ok)} .plan .ps.late{color:var(--red)} .plan .ps.soon{color:var(--yellow)}
 .plan tr.inc .pn{font-weight:400}
 .plan tr.tot td{font-weight:600;color:var(--ok)}
@@ -1217,7 +1219,7 @@ function renderEditor(){
   if(isBudget){ budgetMonthReset(n); if(syncMoney(n)) changed(); }
   else n.blocks.forEach(b => { if(b.habit) refreshHabit(b); });
   const tagMap = {};
-  if(isBudget){ const B = budgetOf(n); B.pays.forEach(x => tagMap[x.b.id] = dueTag(x)); Object.assign(tagMap, B.tags); }
+  if(isBudget){ const B = budgetOf(n); B.pays.forEach(x => tagMap[x.b.id] = dueTag(x)); B.later.forEach(x => tagMap[x.b.id] = `<span class="due">${x.dueLabel} · через ${x.left} ${dayWord(x.left)}</span>`); B.paidEarlier.forEach(x => tagMap[x.b.id] = `<span class="due paid">оплачено</span>`); Object.assign(tagMap, B.tags); }
   const checks = n.blocks.filter(b => b.type === "check");
   const del = confirmDel === "note"
     ? `<span class="confirm">В корзину? <button class="chip danger" id="yesDelNote">Да</button><button class="chip" id="noDel">Нет</button></span>`
@@ -1282,6 +1284,21 @@ function parseMoney(str){
   const v = parseFloat(m[1].replace(",", "."));
   return m[2] ? v * 1000 : v;
 }
+/* Платёж с месяцем: «до 15.12», «до 15.12.2026», «до 15 дек», «@15 декабря»; «ежегодно» — каждый год */
+const FULL_DUE_RE = /(?:(?:^|[\s,;(—–-])до\s*|@\s*)(\d{1,2})(?:\.(\d{1,2})(?:\.(\d{2,4}))?|\s+(янв|фев|мар|апр|ма[йя]|июн|июл|авг|сен|окт|ноя|дек)[а-яё]*)(?![\d.])/i;
+const YEARLY_RE = /(?:^|\s)(ежегодно|каждый год|раз в год)(?=$|[\s,.;!?)])/i;
+/* Дата ближайшего срока: без года — в этом году, а если он прошёл больше двух месяцев назад — в следующем */
+function payOcc(text){
+  const m = text.match(FULL_DUE_RE); if(!m) return null;
+  const day = +m[1], mon = m[2] ? +m[2] - 1 : MON.findIndex(x => m[4].toLowerCase().startsWith(x));
+  if(mon < 0 || mon > 11 || day < 1 || day > 31) return null;
+  const t0 = day0();
+  let date;
+  if(m[3]){ let y = +m[3]; if(y < 100) y += 2000; date = new Date(y, mon, day); }
+  else { date = new Date(t0.getFullYear(), mon, day); if(date < new Date(t0.getFullYear(), t0.getMonth(), t0.getDate() - 60)) date = new Date(t0.getFullYear() + 1, mon, day); }
+  return {date, yearly: !m[3] && YEARLY_RE.test(text), match: m[0]};
+}
+const dateShort = d => d.toLocaleDateString("ru-RU", {day:"numeric", month:"short"}).replace(".", "") + (d.getFullYear() !== new Date().getFullYear() ? " " + d.getFullYear() : "");
 const DUE_RE = /(?:(?:^|[\s,;(—–-])до\s*|@\s*)(\d{1,2})(?:\s*-?\s*(?:го|е|ого))?(?:\s*числа)?|(\d{1,2})\s*-?\s*(?:го|е)?\s+числа/i;
 const BAL_RE = /^(есть|баланс|на руках|на карте|остаток)\s*:?\s*(.*)$/i;
 const PAY_RE = /^(зарплата|зп|аванс|получка|доход)\s*:?\s*(.*)$/i;
@@ -1436,7 +1453,7 @@ function shortDay(isoStr){
 function budgetOf(n){
   const today = new Date().getDate();
   let balance = null, balAt = 0, adults = 0, kids = 0, people = 0;
-  const incomes = [], pays = [], over = {}, spends = [], deps = [], goals = [], tags = {};
+  const incomes = [], pays = [], over = {}, spends = [], deps = [], goals = [], tags = {}, later = [], paidEarlier = [];
   // свой курс из строк «Курс: 92», «Курс €: 100»
   const myRate = {};
   for(const b of n.blocks){
@@ -1497,15 +1514,25 @@ function budgetOf(n){
       continue;
     }
     if(b.type !== "check") continue;
-    const dm = t.match(DUE_RE);
-    const due = dm ? +(dm[1] || dm[2]) : null;
-    const rest = dm ? t.replace(dm[0], " ") : t;
+    const occ = payOcc(t);
+    let due = null, rest;
+    if(occ) rest = t.replace(occ.match, " ").replace(YEARLY_RE, " ");
+    else { const dm = t.match(DUE_RE); due = dm ? +(dm[1] || dm[2]) : null; rest = dm ? t.replace(dm[0], " ") : t; }
     const mv = money(rest);
     if(!mv) continue;
     const amount = mv.rub;
     const label = unThousand(rest).replace(/\d+(?:[.,]\d+)?\s*(тыс|к|k|₽|р\.?|руб\.?)?(?![a-zа-яё])/i, "").replace(/\$|€|\busd\b|\beur\b|евро|долл\S*|дол\.|бакс\S*/gi, "").replace(/[—–\-:,.]+\s*$/, "").replace(/\s+/g, " ").trim() || "Платёж";
+    if(occ){
+      const k = Math.round((occ.date - day0()) / 864e5), now = new Date();
+      const inMonth = occ.date.getFullYear() === now.getFullYear() && occ.date.getMonth() === now.getMonth();
+      const done = occ.yearly ? !!(b.done && b.paidYear === occ.date.getFullYear()) : !!b.done;
+      const info = {b, label, amount, cur:mv.cur, orig:mv.orig, dated:true, yearly:occ.yearly, date:occ.date, dueLabel:dateShort(occ.date), done};
+      if(!inMonth && (done || k >= 0)){ if(!done) later.push({...info, left:k}); else paidEarlier.push(info); continue; }   // другой месяц — не в плане этого
+      pays.push({...info, due: inMonth ? occ.date.getDate() : null, overdue: !done && k < 0, left: k >= 0 ? k : null});
+      continue;
+    }
     const overdue = !b.done && due != null && due < today;
-    pays.push({b, label, amount, cur:mv.cur, orig:mv.orig, due, done:b.done, overdue, left: due != null && due >= today ? due - today : null});
+    pays.push({b, label, amount, cur:mv.cur, orig:mv.orig, due, dueLabel: due != null ? due + "-го" : null, done:b.done, overdue, left: due != null && due >= today ? due - today : null});
   }
   const total = pays.reduce((s, x) => s + x.amount, 0);
   const paid = pays.filter(x => x.done).reduce((s, x) => s + x.amount, 0);
@@ -1626,7 +1653,8 @@ function budgetOf(n){
     for(const p of periods){ if(p.left == null) break; p.carry = carry; p.total = carry + p.left; carry = p.total; }
   }
   const fx = usedCur.size || noRate ? {cur:[...usedCur], noRate, rate:Object.fromEntries([...usedCur].map(c => [c, myRate[c] || FX.rates?.[c]])), mine:myRate} : null;
-  return {fx, balance, pays, total, paid, unpaid, free, dueNow, laterPays, daysToPay, perDay, livingUntilPay, next: open[0] || null, nextIncome, plan, periods,
+  later.sort((a, c) => a.date - c.date);
+  return {fx, later, paidEarlier, balance, pays, total, paid, unpaid, free, dueNow, laterPays, daysToPay, perDay, livingUntilPay, next: open[0] || null, nextIncome, plan, periods,
     spends, spent, todaySub, depSince, goals:goalsInfo, tags};
 }
 function dayWord(n){ const a = n % 10, b = n % 100; return a === 1 && b !== 11 ? "день" : a >= 2 && a <= 4 && (b < 12 || b > 14) ? "дня" : "дней"; }
@@ -1638,7 +1666,7 @@ try{ paysOpen = localStorage.getItem("notes-pays-open") === "1"; }catch(e){}
 function paysRows(B, P){
   const paidN = B.pays.filter(x => x.done).length;
   const summary = `${B.pays.length} ${B.pays.length % 10 === 1 && B.pays.length % 100 !== 11 ? "платёж" : [2,3,4].includes(B.pays.length % 10) && ![12,13,14].includes(B.pays.length % 100) ? "платежа" : "платежей"}` +
-    (paidN ? ` · оплачено ${paidN}` : "") + (B.unpaid ? ` · осталось ${rub(B.unpaid)}` : "");
+    (paidN ? ` · оплачено ${paidN}` : "") + (B.unpaid ? ` · осталось ${rub(B.unpaid)}` : "") + (B.later.length ? ` · ещё ${B.later.length} в другие месяцы` : "");
   const head = `<tr class="pays-head"><td><button class="ptoggle" id="paysToggle" aria-expanded="${paysOpen}">Обязательные платежи <span class="pchev">${paysOpen ? "▾" : "▸"}</span></button><span class="pn">${summary}</span></td><td>${rub(B.total)}</td><td>${pctOf(B.total, P.income)}</td></tr>`;
   if(!paysOpen) return head;
   const order = [...B.pays].sort((a, b) => (a.done - b.done) || (b.overdue - a.overdue) || ((a.due ?? 99) - (b.due ?? 99)));
@@ -1646,11 +1674,13 @@ function paysRows(B, P){
     : x.overdue ? `<span class="ps late">просрочен</span>`
     : x.left === 0 ? `<span class="ps soon">сегодня</span>`
     : x.left != null ? `<span class="ps">через ${x.left} ${dayWord(x.left)}</span>` : "";
-  return head + order.map(x => `<tr class="sub${x.done ? " paid" : ""}"><td><span class="pl">${esc(x.label)}</span><span class="pn">${x.due != null ? `до ${x.due}-го · ` : ""}${status(x)}${x.cur ? ` · ${fmtCur(x.orig, x.cur)}` : ""}</span></td><td>${rub(x.amount)}</td><td>${pctOf(x.amount, P.income)}</td></tr>`).join("");
+ const tail = B.later.length ? `<tr class="sub later-h"><td colspan="3">В другие месяцы — в план этого месяца не входят</td></tr>` + B.later.map(x =>
+    `<tr class="sub later"><td><span class="pl">${esc(x.label)}</span><span class="pn">до ${x.dueLabel}${x.yearly ? " ежегодно" : ""} · через ${x.left} ${dayWord(x.left)}${x.cur ? ` · ${fmtCur(x.orig, x.cur)}` : ""}</span></td><td>${rub(x.amount)}</td><td></td></tr>`).join("") : "";
+  return head + order.map(x => `<tr class="sub${x.done ? " paid" : ""}"><td><span class="pl">${esc(x.label)}</span><span class="pn">${x.dueLabel ? `до ${x.dueLabel}${x.yearly ? " ежегодно" : ""} · ` : ""}${status(x)}${x.cur ? ` · ${fmtCur(x.orig, x.cur)}` : ""}</span></td><td>${rub(x.amount)}</td><td>${pctOf(x.amount, P.income)}</td></tr>`).join("") + tail;
 }
 function budgetPanel(n){
   const B = budgetOf(n);
-  const help = `<div class="bg-help">Пишите строками: <code>Есть: 85 000</code> <code>Зарплата: 10-го 40 000</code> <code>Аванс: 25-го 30 000</code> <code>Людей: 3</code>, платежи — <code>[.] Аренда 35 000 до 5</code>. Валюта: <code>Зарплата: 10-го 1 500 $</code>, <code>200 €</code>. Свои нормы: <code>Еда: 40 000</code> <code>Транспорт: 12%</code> <code>Развлечения: 5 000</code> <code>Копить: 15%</code>. Траты — <code>- 450 кофе</code>, <code>- 1 200 такси @вчера</code>. Цели — <code>Цель: Отпуск 120 000 к 01.06</code>, пополнение <code>+ 5 000 отпуск</code>. Галочки платежей снимаются 1-го числа.</div>`;
+  const help = `<div class="bg-help">Пишите строками: <code>Есть: 85 000</code> <code>Зарплата: 10-го 40 000</code> <code>Аванс: 25-го 30 000</code> <code>Людей: 3</code>, платежи — <code>[.] Аренда 35 000 до 5</code>, с месяцем — <code>до 15.12</code> или <code>до 15 дек</code>, раз в год — добавьте <code>ежегодно</code>. Валюта: <code>Зарплата: 10-го 1 500 $</code>, <code>200 €</code>. Свои нормы: <code>Еда: 40 000</code> <code>Транспорт: 12%</code> <code>Развлечения: 5 000</code> <code>Копить: 15%</code>. Траты — <code>- 450 кофе</code>, <code>- 1 200 такси @вчера</code>. Цели — <code>Цель: Отпуск 120 000 к 01.06</code>, пополнение <code>+ 5 000 отпуск</code>. Галочки платежей снимаются 1-го числа.</div>`;
   if(B.balance == null && !B.pays.length && !B.plan && !B.spends.length && !B.goals) return `<div class="budget" id="budgetPanel">${help}</div>`;
   const ni = B.nextIncome;
   const GEN = {"зарплата":"зарплаты","зп":"зп","аванс":"аванса","получка":"получки","доход":"дохода"};
@@ -1668,7 +1698,7 @@ function budgetPanel(n){
   const pct = B.total ? Math.round(B.paid / B.total * 100) : 0;
   const nx = B.next;
   const nextTxt = nx ? `<div class="bg-next${nx.overdue ? " late" : ""}">${nx.overdue ? "Просрочен" : "Ближайший"}: ${esc(nx.label)} — ${rub(nx.amount)}${
-      nx.overdue ? `, срок был ${nx.due}-го` : nx.left === 0 ? ", сегодня" : nx.left != null ? `, через ${nx.left} ${dayWord(nx.left)}` : ""}</div>`
+      nx.overdue ? `, срок был ${nx.dueLabel}` : nx.left === 0 ? ", сегодня" : nx.left != null ? `, через ${nx.left} ${dayWord(nx.left)}` : ""}</div>`
     : B.pays.length ? `<div class="bg-next">Все обязательные платежи этого месяца оплачены</div>` : "";
   const P = B.plan;
   let planHtml = "";
@@ -1691,7 +1721,7 @@ function budgetPanel(n){
     </div>`;
   }
   const per = B.periods.length ? `<div class="plan"><span class="bl">По зарплатам</span><table>${B.periods.map(p =>
-      `<tr><td>${esc(p.x.name)} ${p.from}-го${p.soon === 0 ? " · сегодня" : ` · через ${p.soon} ${dayWord(p.soon)}`}${p.x.amount ? `<span class="pn">${rub(p.x.amount)}${p.x.cur ? ` (${fmtCur(p.x.orig, p.x.cur)})` : ""} на ${p.len} ${dayWord(p.len)}, до ${p.to}-го</span>` : ""}</td><td>${p.count ? `платежи ${rub(p.sum)}<span class="pn">${p.ps.map(q => esc(q.label) + " " + q.due + "-го").join(", ")}</span>` : "без платежей"}<span class="pn">на жизнь ≈ ${rub(p.life)}</span></td><td>${p.total != null ? `<b class="${p.total < 0 ? "neg" : ""}">${p.total < 0 ? "−" : ""}${rub(Math.abs(p.total))}</b><span class="pn">${p.total < 0 ? "не хватит" : "останется"}${p.carry ? `, с учётом ${rub(p.carry)} с прошлой` : ""}</span>` : ""}</td></tr>`).join("")}</table></div>` : "";
+      `<tr><td>${esc(p.x.name)} ${p.from}-го${p.soon === 0 ? " · сегодня" : ` · через ${p.soon} ${dayWord(p.soon)}`}${p.x.amount ? `<span class="pn">${rub(p.x.amount)}${p.x.cur ? ` (${fmtCur(p.x.orig, p.x.cur)})` : ""} на ${p.len} ${dayWord(p.len)}, до ${p.to}-го</span>` : ""}</td><td>${p.count ? `платежи ${rub(p.sum)}<span class="pn">${p.ps.map(q => esc(q.label) + " " + q.dueLabel).join(", ")}</span>` : "без платежей"}<span class="pn">на жизнь ≈ ${rub(p.life)}</span></td><td>${p.total != null ? `<b class="${p.total < 0 ? "neg" : ""}">${p.total < 0 ? "−" : ""}${rub(Math.abs(p.total))}</b><span class="pn">${p.total < 0 ? "не хватит" : "останется"}${p.carry ? `, с учётом ${rub(p.carry)} с прошлой` : ""}</span>` : ""}</td></tr>`).join("")}</table></div>` : "";
   return `<div class="budget" id="budgetPanel">${main}
     ${B.pays.length ? `<div class="bg-grid">
       ${B.balance != null ? `<div><span class="bl">Есть</span><b>${rub(B.balance)}</b></div>` : ""}
@@ -1764,7 +1794,7 @@ function budgetMonthReset(n){
   const now = ym();
   if(!n.month){ n.month = now; return false; }
   if(n.month === now) return false;
-  n.blocks.forEach(b => { if(b.type === "check") b.done = false; });
+  n.blocks.forEach(b => { if(b.type === "check" && !payOcc(b.text)) b.done = false; });
   n.month = now; n.updated = Date.now(); changed();
   return true;
 }
@@ -1918,6 +1948,7 @@ $("#app").addEventListener("input", e => {
   if(e.target.type === "checkbox"){
     b.done = e.target.checked;
     if(b.habit){ b.hist = b.hist || {}; const k = iso(day0()); if(b.done) b.hist[k] = true; else delete b.hist[k]; }
+    if(n.kind === "budget"){ const o = payOcc(b.text); if(o && o.yearly){ if(b.done) b.paidYear = o.date.getFullYear(); else delete b.paidYear; } }
     redraw(); if(b.done) hop(); return;
   }
   const val = e.target.value;
