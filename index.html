@@ -1219,7 +1219,7 @@ function renderEditor(){
   if(isBudget){ budgetMonthReset(n); if(syncMoney(n)) changed(); }
   else n.blocks.forEach(b => { if(b.habit) refreshHabit(b); });
   const tagMap = {};
-  if(isBudget){ const B = budgetOf(n); B.pays.forEach(x => tagMap[x.b.id] = dueTag(x)); B.later.forEach(x => tagMap[x.b.id] = `<span class="due">${x.dueLabel} · через ${x.left} ${dayWord(x.left)}</span>`); B.paidEarlier.forEach(x => tagMap[x.b.id] = `<span class="due paid">оплачено</span>`); Object.assign(tagMap, B.tags); }
+  if(isBudget) Object.assign(tagMap, budgetTags(budgetOf(n)));
   const checks = n.blocks.filter(b => b.type === "check");
   const del = confirmDel === "note"
     ? `<span class="confirm">В корзину? <button class="chip danger" id="yesDelNote">Да</button><button class="chip" id="noDel">Нет</button></span>`
@@ -1527,8 +1527,10 @@ function budgetOf(n){
       const inMonth = occ.date.getFullYear() === now.getFullYear() && occ.date.getMonth() === now.getMonth();
       const done = occ.yearly ? !!(b.done && b.paidYear === occ.date.getFullYear()) : !!b.done;
       const info = {b, label, amount, cur:mv.cur, orig:mv.orig, dated:true, yearly:occ.yearly, date:occ.date, dueLabel:dateShort(occ.date), done};
-      if(!inMonth && (done || k >= 0)){ if(!done) later.push({...info, left:k}); else paidEarlier.push(info); continue; }   // другой месяц — не в плане этого
-      pays.push({...info, due: inMonth ? occ.date.getDate() : null, overdue: !done && k < 0, left: k >= 0 ? k : null});
+      const soon = k >= 0 && k <= 31;   // ближайший месяц вперёд считаем вместе с текущим
+      if(!inMonth && !soon && (done || k >= 0)){ if(!done) later.push({...info, left:k}); else paidEarlier.push(info); continue; }
+      if(!inMonth && done && k < 0){ paidEarlier.push(info); continue; }
+      pays.push({...info, due: occ.date.getDate(), overdue: !done && k < 0, left: k >= 0 ? k : null});
       continue;
     }
     const overdue = !b.done && due != null && due < today;
@@ -1643,7 +1645,10 @@ function budgetOf(n){
       // период, начинающийся в этом месяце: платежи с числом не раньше начала приходятся на этот месяц,
       // и уже оплаченные из них не считаются; остальные — уже следующий месяц, их нужно будет платить снова
       const thisMonth = d => from >= today && d >= from;
-      const ps = pays.filter(p => p.due != null && inP(p.due) && !(p.done && thisMonth(p.due)));
+      const startK = daysUntil(from);   // через сколько дней начинается период
+      const ps = pays.filter(p => p.dated
+        ? !p.done && p.left != null && p.left >= startK && p.left < startK + len
+        : p.due != null && inP(p.due) && !(p.done && thisMonth(p.due)));
       const sum = ps.reduce((s, p) => s + p.amount, 0);
       const life = Math.round(living * len / dim);
       return {x, from, to, len, sum, ps, count: ps.length, life, soon: daysUntil(from), left: x.amount != null ? x.amount - sum - life : null};
@@ -1685,14 +1690,16 @@ function budgetPanel(n){
   const ni = B.nextIncome;
   const GEN = {"зарплата":"зарплаты","зп":"зп","аванс":"аванса","получка":"получки","доход":"дохода"};
   const payName = ni ? `${GEN[ni.name.toLowerCase()] || ni.name.toLowerCase()} ${ni.day}-го` : "зарплаты";
-  const laterSum = B.laterPays.reduce((s, x) => s + x.amount, 0);
+  // из ближайшей зарплаты — только платежи её периода (до следующей зарплаты); если зарплата одна — все оставшиеся
+  const fromNext = B.periods.length ? B.periods[0].ps.filter(x => !x.done) : B.laterPays;
+  const laterSum = fromNext.reduce((s, x) => s + x.amount, 0);
   const main = B.free != null
     ? `<div><span class="bl">Свободно до ${ni ? payName : "зарплаты"}</span><span class="bv${B.free < 0 ? " neg" : ""}">${rub(B.free)}</span>${
         B.perDay != null ? `<span class="bs">≈ ${rub(Math.max(0, B.perDay))} в день · ${B.daysToPay} ${dayWord(B.daysToPay)}${ni && ni.amount ? `, потом придёт ${rub(ni.amount)}` : ""}</span>`
         : B.daysToPay === 0 ? `<span class="bs">Зарплата сегодня</span>` : ""}
       ${B.dueNow || B.spent?.since || B.depSince ? `<span class="bs">Уже вычтено: ${[B.dueNow ? `платежи до зарплаты ${rub(B.dueNow)}` : "", B.spent?.since ? `траты ${rub(B.spent.since)}` : "", B.depSince ? `на цели ${rub(B.depSince)}` : ""].filter(Boolean).join(", ")}</span>` : ""}
       ${B.perDay != null && B.todaySub ? `<span class="bg-today${B.todaySub > B.perDay ? " neg" : ""}">Сегодня потрачено ${rub(B.todaySub)} — ${B.todaySub > B.perDay ? `больше дневной нормы на ${rub(B.todaySub - Math.max(0, B.perDay))}` : `можно ещё ${rub(B.perDay - B.todaySub)}`}</span>` : ""}
-      ${laterSum ? `<span class="bs">Из ${payName} оплатить: ${B.laterPays.map(x => esc(x.label) + " " + rub(x.amount)).join(", ")}</span>` : ""}
+      ${laterSum ? `<span class="bs">Из ${payName} оплатить: ${fromNext.map(x => esc(x.label) + " " + rub(x.amount)).join(", ")}</span>` : ""}
       ${B.livingUntilPay != null && B.free != null && B.livingUntilPay > B.free ? `<span class="bs neg">На еду и транспорт до зарплаты по плану нужно ≈ ${rub(B.livingUntilPay)}</span>` : ""}</div>`
     : `<div><span class="bl">Свободно сейчас</span><span class="bs">Добавьте строку <b>Есть: сумма</b>, чтобы посчитать остаток</span></div>`;
   const pct = B.total ? Math.round(B.paid / B.total * 100) : 0;
@@ -1780,6 +1787,21 @@ function fxHtml(B){
     : `рыночный курс на ${new Date(FX.at).toLocaleDateString("ru-RU", {day:"numeric", month:"short"})}, <a href="https://www.exchangerate-api.com" target="_blank" rel="noopener">ExchangeRate-API</a>`;
   const inc = B.plan ? "" : "";
   return `<div class="bg-note">Курс: ${parts} · ${src}${B.fx.noRate ? ". Для части сумм курса нет" : ""}</div>`;
+}
+function budgetTags(B){
+  const m = {};
+  B.pays.forEach(x => m[x.b.id] = dueTag(x));
+  B.later.forEach(x => m[x.b.id] = `<span class="due">${x.dueLabel} · через ${x.left} ${dayWord(x.left)}</span>`);
+  B.paidEarlier.forEach(x => m[x.b.id] = `<span class="due paid">оплачено</span>`);
+  return Object.assign(m, B.tags);
+}
+/* обновить метки у строк без перерисовки текста, чтобы не сбивать ввод */
+function refreshBudgetTags(n){
+  const m = budgetTags(budgetOf(n));
+  document.querySelectorAll("#blocks .block[data-b]").forEach(el => {
+    el.querySelectorAll(":scope > .due").forEach(x => x.remove());
+    const html = m[el.dataset.b]; if(html) el.insertAdjacentHTML("beforeend", html);
+  });
 }
 function dueTag(info){
   if(!info) return "";
@@ -1971,7 +1993,7 @@ $("#app").addEventListener("input", e => {
     redraw(b.id, Math.max(0, e.target.selectionStart - (val.length - p.text.length))); return;
   }
   b.text = val; autosize(e.target); touch(); refreshSide();
-  if(n.kind === "budget"){ const pnl = $("#budgetPanel"); if(pnl) pnl.outerHTML = budgetPanel(n); }
+  if(n.kind === "budget"){ const pnl = $("#budgetPanel"); if(pnl) pnl.outerHTML = budgetPanel(n); refreshBudgetTags(n); }
 });
 
 /* ===== Выделение нескольких строк: протянуть мышкой или Ctrl+A второй раз ===== */
